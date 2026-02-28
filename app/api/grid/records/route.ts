@@ -49,7 +49,10 @@ type GridFilters = {
   tags?: string[];
 };
 
-const map = {
+type GridTable = "properties_sale" | "properties_rent" | "buyers" | "clients" | "contacts" | "intake_sessions";
+type MapEntry = { table: GridTable; select: string };
+
+const map: Record<string, MapEntry> = {
   sale: {
     table: "properties_sale",
     select: "id, code, status, source, price, currency, size_sqm, bedrooms, bathrooms, area, compound, floor, furnished, finishing, payment_terms, notes, completeness_score, created_at, updated_at"
@@ -66,7 +69,7 @@ const map = {
     table: "clients",
     select: "id, code, status, source, name, phone, role, area, tags, completeness_score, created_at, updated_at"
   }
-} as const;
+};
 
 const editableByType: Record<GridType, Set<string>> = {
   sale: new Set(["source", "price", "currency", "size_sqm", "bedrooms", "bathrooms", "area", "compound", "floor", "furnished", "finishing", "payment_terms", "notes", "status"]),
@@ -126,9 +129,10 @@ export async function GET(request: NextRequest) {
   const sort = parseSort(searchParams.get("sort") || "updated_at:desc");
   const filters = parseFilters(searchParams.get("filters"));
 
-  if (!map[type]) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+  const entry = map[type];
+  if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
 
-  let query = supabase.from(map[type].table).select(map[type].select, { count: "exact" });
+  let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
 
   if (filters.search) {
     const s = filters.search.replace(/,/g, " ").trim();
@@ -243,7 +247,7 @@ export async function GET(request: NextRequest) {
   const ids = safeRows.map((r) => String(r.id || ""));
 
   const { data: mediaRows } = ids.length
-    ? await supabase.from("media").select("record_id, media_type").in("record_id", ids).eq("record_type", map[type].table)
+    ? await supabase.from("media").select("record_id, media_type").in("record_id", ids).eq("record_type", entry.table)
     : { data: [] };
 
   const mediaMap = new Map<string, { images: number; videos: number; documents: number }>();
@@ -318,14 +322,17 @@ export async function PATCH(request: NextRequest) {
     value = Array.isArray(body.value) ? body.value : String(body.value || "").split(",").map((v) => v.trim()).filter(Boolean);
   }
 
-  const { data: before } = await supabase.from(map[body.type].table).select("*").eq("id", body.record_id).maybeSingle();
-  const { error } = await supabase.from(map[body.type].table).update({ [body.field]: value }).eq("id", body.record_id);
+  const patchEntry = map[body.type];
+  if (!patchEntry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+
+  const { data: before } = await supabase.from(patchEntry.table).select("*").eq("id", body.record_id).maybeSingle();
+  const { error } = await supabase.from(patchEntry.table).update({ [body.field]: value }).eq("id", body.record_id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  const { data: after } = await supabase.from(map[body.type].table).select("*").eq("id", body.record_id).maybeSingle();
+  const { data: after } = await supabase.from(patchEntry.table).select("*").eq("id", body.record_id).maybeSingle();
   await writeAuditLog({
     user_id: actor.userId,
     action: `update_${body.field}`,
-    record_type: map[body.type].table,
+    record_type: patchEntry.table,
     record_id: body.record_id,
     before_json: (before || {}) as Record<string, unknown>,
     after_json: (after || {}) as Record<string, unknown>,
