@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
 
   let query = supabase
     .from("intake_sessions")
-    .select("id, status, created_at, type_detected, type_confirmed, raw_text, ai_json, ai_meta, completeness_score")
+    .select("id, parent_session_id, status, created_at, type_detected, type_confirmed, raw_text, ai_json, ai_meta, completeness_score")
     .order("created_at", { ascending: false })
     .limit(200);
 
@@ -81,7 +81,35 @@ export async function GET(request: NextRequest) {
     result = result.filter((row) => `${row.raw_text} ${JSON.stringify(row.ai_json || {})}`.toLowerCase().includes(q));
   }
 
-  return NextResponse.json({ sessions: result });
+  const parentIds = result.filter((row) => !row.parent_session_id).map((row) => row.id);
+  const childRows = result.filter((row) => !!row.parent_session_id);
+  const childByParent = new Map<string, Array<Record<string, unknown>>>();
+
+  for (const child of childRows) {
+    const key = String(child.parent_session_id || "");
+    if (!key) continue;
+    const list = childByParent.get(key) || [];
+    list.push(child);
+    childByParent.set(key, list);
+  }
+
+  const parentsFirst = result
+    .filter((row) => !row.parent_session_id)
+    .map((row) => {
+      const children = (childByParent.get(row.id) || []).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      return {
+        ...row,
+        children,
+        child_count: children.length,
+        multi_listing: Boolean((row.ai_meta as { multi_listing?: boolean } | null)?.multi_listing) || children.length > 1
+      };
+    });
+
+  if (parentIds.length === 0) {
+    return NextResponse.json({ sessions: result.map((row) => ({ ...row, children: [], child_count: 0, multi_listing: false })) });
+  }
+
+  return NextResponse.json({ sessions: parentsFirst });
 }
 
 export async function POST(request: NextRequest) {

@@ -13,6 +13,13 @@ create type client_role as enum ('owner', 'seller', 'landlord');
 create type media_type as enum ('image', 'video', 'document', 'other');
 create type record_type as enum ('properties_sale', 'properties_rent', 'buyers', 'clients');
 
+do $$
+begin
+  if exists (select 1 from pg_type where typname = 'record_type') then
+    alter type record_type add value if not exists 'intake_sessions';
+  end if;
+end $$;
+
 
 do $$
 begin
@@ -72,6 +79,7 @@ $$;
 -- ---------- INTAKE ----------
 create table if not exists intake_sessions (
   id uuid primary key default gen_random_uuid(),
+  parent_session_id uuid references intake_sessions(id) on delete set null,
   created_by uuid references auth.users(id) on delete set null,
   type_detected text not null default '',
   type_confirmed text not null default '',
@@ -91,6 +99,7 @@ for each row execute function set_updated_at();
 alter table intake_sessions add column if not exists ai_meta jsonb not null default '{}'::jsonb;
 alter table intake_sessions add column if not exists final_record_type record_type;
 alter table intake_sessions add column if not exists final_record_id uuid;
+alter table intake_sessions add column if not exists parent_session_id uuid references intake_sessions(id) on delete set null;
 
 -- ---------- CLIENTS ----------
 create table if not exists contacts (
@@ -298,6 +307,7 @@ create table if not exists timeline (
 -- ---------- INDEXES ----------
 create index if not exists idx_intake_sessions_created_by on intake_sessions(created_by);
 create index if not exists idx_intake_sessions_status on intake_sessions(status);
+create index if not exists idx_intake_sessions_parent on intake_sessions(parent_session_id);
 
 create index if not exists idx_properties_sale_code on properties_sale(code);
 create index if not exists idx_properties_rent_code on properties_rent(code);

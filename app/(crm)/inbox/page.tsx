@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { MediaManager } from "@/components/media/media-manager";
 import { MediaSummary } from "@/components/media/media-summary";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 type IntakeStatus = "draft" | "needs_review" | "confirmed";
@@ -12,18 +12,22 @@ type AiState = "idle" | "running" | "success" | "error";
 
 type IntakeSessionRow = {
   id: string;
+  parent_session_id?: string | null;
   status: IntakeStatus;
   created_at: string;
   type_detected: IntakeType;
   type_confirmed: IntakeType;
   raw_text: string;
   ai_json: Record<string, unknown>;
-  ai_meta?: { detect_confidence?: number; extraction_error?: string; normalized_text?: string };
+  ai_meta?: { detect_confidence?: number; extraction_error?: string; normalized_text?: string; multi_listing?: boolean; child_count?: number };
   confidence: number;
   completeness_score: number;
   media: Array<{ id: string; file_url: string; type: "image" | "video" | "document" | "other"; created_at: string }>;
   media_counts: { photos: number; videos: number; docs: number };
   source?: string;
+  child_count?: number;
+  multi_listing?: boolean;
+  children?: IntakeSessionRow[];
 };
 
 function relativeTime(dateString: string) {
@@ -57,6 +61,7 @@ export default function InboxPage() {
   const [jumpToMedia, setJumpToMedia] = useState(false);
   const [aiStateById, setAiStateById] = useState<Record<string, AiState>>({});
   const [aiErrorById, setAiErrorById] = useState<Record<string, string>>({});
+  const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({});
 
   const [status, setStatus] = useState("");
   const [type, setType] = useState("");
@@ -166,6 +171,11 @@ export default function InboxPage() {
   const selectedAiState = selected ? aiStateById[selected.id] || "idle" : "idle";
   const selectedConfidence = selected ? Number(selected.confidence || 0) : 0;
   const canRunAi = !!selected && selected.status === "draft" && (!hasAiJson(selected) || isAiStale(selected));
+  const isParentMulti = !!selected?.multi_listing && Number(selected?.child_count || 0) > 0;
+
+  function toggleExpanded(parentId: string) {
+    setExpandedParents((prev) => ({ ...prev, [parentId]: !prev[parentId] }));
+  }
 
   return (
     <section className="relative grid grid-cols-[1fr_430px] gap-4">
@@ -224,23 +234,51 @@ export default function InboxPage() {
                 </tr>
               )}
 
-              {rows.map((row) => (
-                <tr key={row.id} onClick={() => setSelected(row)} className={`cursor-pointer border-t border-slate-100 hover:bg-slate-50 ${selected?.id === row.id ? "bg-slate-50" : ""}`}>
-                  <td className="px-3 py-2"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusClass(row.status)}`}>{row.status}</span></td>
-                  <td className="px-3 py-2 text-slate-600">{relativeTime(row.created_at)}</td>
-                  <td className="px-3 py-2 uppercase text-slate-700">{row.type_detected || "other"}</td>
-                  <td className="px-3 py-2">
-                    <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold uppercase text-slate-700">{row.source || "manual"}</span>
-                  </td>
-                  <td className="max-w-[420px] truncate px-3 py-2 text-slate-700">{row.raw_text.slice(0, 80)}</td>
-                  <td className="px-3 py-2 text-slate-600">
-                    <button className="rounded px-1 hover:bg-slate-100" onClick={(e) => { e.stopPropagation(); setSelected(row); setJumpToMedia(true); }}>
-                      <MediaSummary items={row.media as never} />
-                    </button>
-                  </td>
-                  <td className="px-3 py-2 font-medium text-slate-700">{Number(row.completeness_score || 0)}%</td>
-                </tr>
-              ))}
+              {rows.map((row) => {
+                const children = row.children || [];
+                const expanded = !!expandedParents[row.id];
+                return (
+                  <Fragment key={row.id}>
+                    <tr key={row.id} onClick={() => setSelected(row)} className={`cursor-pointer border-t border-slate-100 hover:bg-slate-50 ${selected?.id === row.id ? "bg-slate-50" : ""}`}>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          {!!children.length && (
+                            <button onClick={(e) => { e.stopPropagation(); toggleExpanded(row.id); }} className="rounded border border-slate-300 px-1 text-[10px]">
+                              {expanded ? "−" : "+"}
+                            </button>
+                          )}
+                          <span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusClass(row.status)}`}>{row.status}</span>
+                          {row.multi_listing && <span className="rounded-full bg-indigo-100 px-2 py-1 text-[10px] font-semibold text-indigo-700">Multiple Listings</span>}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">{relativeTime(row.created_at)}</td>
+                      <td className="px-3 py-2 uppercase text-slate-700">{row.type_detected || "other"}</td>
+                      <td className="px-3 py-2">
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold uppercase text-slate-700">{row.source || "manual"}</span>
+                      </td>
+                      <td className="max-w-[420px] truncate px-3 py-2 text-slate-700">{row.raw_text.slice(0, 80)}</td>
+                      <td className="px-3 py-2 text-slate-600">
+                        <button className="rounded px-1 hover:bg-slate-100" onClick={(e) => { e.stopPropagation(); setSelected(row); setJumpToMedia(true); }}>
+                          <MediaSummary items={row.media as never} />
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 font-medium text-slate-700">{Number(row.completeness_score || 0)}%</td>
+                    </tr>
+
+                    {expanded && children.map((child) => (
+                      <tr key={child.id} onClick={() => setSelected(child)} className={`cursor-pointer border-t border-slate-100 bg-slate-50/60 hover:bg-slate-100 ${selected?.id === child.id ? "bg-slate-100" : ""}`}>
+                        <td className="px-3 py-2 pl-10"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${statusClass(child.status)}`}>{child.status}</span></td>
+                        <td className="px-3 py-2 text-slate-600">{relativeTime(child.created_at)}</td>
+                        <td className="px-3 py-2 uppercase text-slate-700">{child.type_detected || "other"}</td>
+                        <td className="px-3 py-2"><span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-700">Child Draft</span></td>
+                        <td className="max-w-[420px] truncate px-3 py-2 text-slate-700">{child.raw_text.slice(0, 80)}</td>
+                        <td className="px-3 py-2 text-slate-600"><MediaSummary items={child.media as never} /></td>
+                        <td className="px-3 py-2 font-medium text-slate-700">{Number(child.completeness_score || 0)}%</td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -277,7 +315,8 @@ export default function InboxPage() {
               <MediaManager intakeSessionId={selected.id} compact={false} />
             </div>
 
-            <Link href={`/inbox/${selected.id}`} className="block w-full rounded-lg bg-slate-900 px-3 py-2 text-center text-sm font-medium text-white">Review &amp; Confirm</Link>
+            {!isParentMulti && <Link href={`/inbox/${selected.id}`} className="block w-full rounded-lg bg-slate-900 px-3 py-2 text-center text-sm font-medium text-white">Review &amp; Confirm</Link>}
+            {isParentMulti && <p className="text-xs text-indigo-700">Confirm each child draft separately from the expanded list.</p>}
           </div>
         )}
       </aside>

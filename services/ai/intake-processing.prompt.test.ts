@@ -7,6 +7,7 @@ import {
   getBuyerPrompt,
   getClientPrompt,
   normalizeDetectedText,
+  heuristicSplitListings,
   parseDetectModelPayload,
   validateAndNormalize
 } from "@/services/ai/intake-processing.service";
@@ -147,4 +148,16 @@ test("normalizeDetectedText performs numeral/currency/punctuation cleanup", () =
   assert.equal(out.includes("12000"), true);
   assert.equal(out.includes("egp"), true);
   assert.equal(out.includes("!!!!"), false);
+});
+
+test("heuristicSplitListings detects numbered multi-listings", () => {
+  const out = heuristicSplitListings(`1) شقة للبيع 3500000 جنيه في التجمع\n2) شقة للبيع 4200000 جنيه في المعادي`);
+  assert.equal(out.multi_listing, true);
+  assert.equal(out.segments.length >= 2, true);
+});
+
+test("heuristicSplitListings stays single for one listing", () => {
+  const out = heuristicSplitListings("Apartment for sale in New Cairo price 5500000 EGP, 3 bedrooms");
+  assert.equal(out.multi_listing, false);
+  assert.equal(out.segments.length, 0);
 });

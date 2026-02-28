@@ -18,6 +18,11 @@ type ValidateResult = {
   confidence_map: Record<string, number>;
 };
 
+export type MultiListingResult = {
+  multi_listing: boolean;
+  segments: string[];
+};
+
 export class ExtractionParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -33,6 +38,11 @@ const detectSchema = z.object({
   language: z.enum(["ar", "en", "mixed"]),
   normalized_text: z.string(),
   signals: z.array(z.string()).default([])
+});
+
+const multiListingSchema = z.object({
+  multi_listing: z.boolean(),
+  segments: z.array(z.string()).default([])
 });
 
 const saleSchema = z.object({
@@ -176,6 +186,22 @@ Hard rules:
 8) If text is mainly about a person (name/phone/needs), choose buyer or client based on wording.
 9) Never invent missing details. Use only evidence from the input.`;
 
+const DETECT_MULTI_LISTING_PROMPT = `You split CRM intake text into listing segments.
+Return ONLY valid JSON:
+{
+  "multi_listing": false,
+  "segments": []
+}
+
+Rules:
+- multi_listing=true only when there are clearly multiple listings/properties.
+- Detect by repeated price patterns, multiple area mentions, list separators, numbering, or newline blocks.
+- Support Arabic + English mixed text.
+- If multi_listing=true, segments must contain each listing text independently.
+- Keep each segment meaningful and concise.
+- If uncertain, return multi_listing=false.
+- Never merge multiple listings into one segment.`;
+
 export function getSalePrompt() {
   return `${extractionPromptBase}\n\nReturn ONLY this JSON object exactly:\n{\n  "code":"",\n  "listing_type":"sale",\n  "property_type":"",\n  "price":"",\n  "currency":"",\n  "size_sqm":"",\n  "bedrooms":"",\n  "bathrooms":"",\n  "location_area":"",\n  "compound":"",\n  "floor":"",\n  "furnished":"",\n  "finishing":"",\n  "payment_terms":"",\n  "contact_name":"",\n  "contact_phone":"",\n  "notes":""\n}`;
 }
@@ -287,6 +313,49 @@ export async function detectTypeAndLanguage(rawText: string): Promise<DetectResu
     { role: "user", content: rawText }
   ]);
   return parseDetectModelPayload(await parseJsonWithRepair(content));
+}
+
+export function heuristicSplitListings(rawText: string): MultiListingResult {
+  const normalized = normalizeDetectedText(rawText);
+  const lines = rawText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const numbered = rawText
+    .split(/\n(?=(?:\d+[\).\-]|[-*•]\s+|(?:listing|unit|property|شقة|فيلا|دوبلكس|وحدة)\b))/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 20);
+
+  const priceMatches = normalized.match(/(?:\b\d{5,}\b)\s*(?:egp|جنيه)?/gi) || [];
+  const areaMatches = normalized.match(/(?:in|area|compound|منطقة|في|التجمع|المعادي|الشيخ زايد)\s+[\p{L}\d\- ]+/giu) || [];
+  const separatorHits = (rawText.match(/(?:^|\n)\s*(?:\d+[\).\-]|[-*•])/gm) || []).length;
+
+  if (numbered.length >= 2 && (priceMatches.length >= 2 || separatorHits >= 2 || lines.length >= 4)) {
+    return { multi_listing: true, segments: numbered.slice(0, 10) };
+  }
+
+  if (lines.length >= 4 && priceMatches.length >= 2 && areaMatches.length >= 2) {
+    const blocks = rawText.split(/\n\s*\n+/).map((s) => s.trim()).filter((s) => s.length > 20);
+    if (blocks.length >= 2) {
+      return { multi_listing: true, segments: blocks.slice(0, 10) };
+    }
+  }
+
+  return { multi_listing: false, segments: [] };
+}
+
+export async function detectMultipleListings(rawText: string): Promise<MultiListingResult> {
+  const heuristic = heuristicSplitListings(rawText);
+  if (heuristic.multi_listing) return heuristic;
+
+  const content = await completeJson([
+    { role: "system", content: DETECT_MULTI_LISTING_PROMPT },
+    { role: "user", content: rawText }
+  ]);
+  const parsed = multiListingSchema.parse(await parseJsonWithRepair(content));
+  const segments = (parsed.segments || []).map((s) => normalizeDetectedText(String(s))).filter(Boolean);
+  return { multi_listing: parsed.multi_listing && segments.length > 1, segments };
 }
 
 export async function extractByType(type: IntakeType, normalizedText: string): Promise<Record<string, unknown>> {
