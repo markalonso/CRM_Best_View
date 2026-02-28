@@ -17,6 +17,21 @@ do $$
 begin
   if exists (select 1 from pg_type where typname = 'record_type') then
     alter type record_type add value if not exists 'intake_sessions';
+    alter type record_type add value if not exists 'contacts';
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_type where typname = 'task_status') then
+    create type task_status as enum ('open', 'done', 'cancelled');
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_type where typname = 'task_related_type') then
+    create type task_related_type as enum ('sale', 'rent', 'buyer', 'client', 'contact');
   end if;
 end $$;
 
@@ -304,10 +319,26 @@ create table if not exists timeline (
   created_at timestamptz not null default now()
 );
 
+-- ---------- TASKS ----------
+create table if not exists tasks (
+  id uuid primary key default gen_random_uuid(),
+  related_type task_related_type not null,
+  related_id uuid not null,
+  title text not null,
+  due_date timestamptz,
+  status task_status not null default 'open',
+  assigned_to uuid references auth.users(id) on delete set null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
 -- ---------- INDEXES ----------
 create index if not exists idx_intake_sessions_created_by on intake_sessions(created_by);
 create index if not exists idx_intake_sessions_status on intake_sessions(status);
 create index if not exists idx_intake_sessions_parent on intake_sessions(parent_session_id);
+create index if not exists idx_tasks_status_due on tasks(status, due_date);
+create index if not exists idx_tasks_assigned_to on tasks(assigned_to, status, due_date);
+create index if not exists idx_tasks_related on tasks(related_type, related_id, created_at desc);
 
 create index if not exists idx_properties_sale_code on properties_sale(code);
 create index if not exists idx_properties_rent_code on properties_rent(code);
@@ -393,6 +424,7 @@ alter table contacts enable row level security;
 alter table media enable row level security;
 alter table timeline enable row level security;
 alter table audit_logs enable row level security;
+alter table tasks enable row level security;
 
 create or replace function current_app_role()
 returns app_role
@@ -478,6 +510,15 @@ drop policy if exists timeline_read_all on timeline;
 create policy timeline_read_all on timeline for select using (current_app_role() in ('viewer','agent','admin'));
 drop policy if exists timeline_write_agent on timeline;
 create policy timeline_write_agent on timeline for insert with check (current_app_role() in ('agent','admin'));
+
+drop policy if exists tasks_read_all on tasks;
+create policy tasks_read_all on tasks for select using (current_app_role() in ('viewer','agent','admin'));
+drop policy if exists tasks_insert_agent on tasks;
+create policy tasks_insert_agent on tasks for insert with check (current_app_role() in ('agent','admin'));
+drop policy if exists tasks_update_agent on tasks;
+create policy tasks_update_agent on tasks for update using (current_app_role() in ('agent','admin')) with check (current_app_role() in ('agent','admin'));
+drop policy if exists tasks_delete_admin on tasks;
+create policy tasks_delete_admin on tasks for delete using (current_app_role() = 'admin');
 
 drop policy if exists audit_read_all on audit_logs;
 create policy audit_read_all on audit_logs for select using (current_app_role() in ('agent','admin'));

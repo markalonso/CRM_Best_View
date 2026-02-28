@@ -62,6 +62,7 @@ export async function GET() {
     buyerTotal,
     clientTotal,
     intakeToday,
+    overdueTasks,
     saleNeedsReview,
     rentNeedsReview,
     buyerNeedsReview,
@@ -86,6 +87,7 @@ export async function GET() {
     supabase.from("buyers").select("id", { count: "exact", head: true }),
     supabase.from("clients").select("id", { count: "exact", head: true }),
     supabase.from("intake_sessions").select("id", { count: "exact", head: true }).gte("created_at", todayIso),
+    supabase.from("tasks").select("id", { count: "exact", head: true }).eq("status", "open").lt("due_date", new Date().toISOString()),
     supabase.from("properties_sale").select("id", { count: "exact", head: true }).eq("status", "needs_review"),
     supabase.from("properties_rent").select("id", { count: "exact", head: true }).eq("status", "needs_review"),
     supabase.from("buyers").select("id", { count: "exact", head: true }).eq("status", "needs_review"),
@@ -179,6 +181,7 @@ export async function GET() {
       buyer_total: buyerTotal.count || 0,
       client_total: clientTotal.count || 0,
       intake_today: intakeToday.count || 0,
+      overdue_tasks: overdueTasks.count || 0,
       needs_review_total: (saleNeedsReview.count || 0) + (rentNeedsReview.count || 0) + (buyerNeedsReview.count || 0) + (clientNeedsReview.count || 0) + (inboxNeedsReview.count || 0)
     },
     trends: [...trendsMap.values()],

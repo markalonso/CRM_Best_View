@@ -21,6 +21,7 @@ type DashboardResponse = {
     buyer_total: number;
     client_total: number;
     intake_today: number;
+    overdue_tasks: number;
     needs_review_total: number;
   };
   trends: Array<{ date: string; sale: number; rent: number; buyer: number; client: number; intake: number; confirmed: number; needs_review: number }>;
@@ -84,6 +85,7 @@ export default function DashboardPage() {
           <Card title="Total Buyers" value={data.kpis.buyer_total} href="/buyers" onNavigate={(href) => window.location.assign(href)} />
           <Card title="Total Clients" value={data.kpis.client_total} href="/clients" onNavigate={(href) => window.location.assign(href)} />
           <Card title="New intakes today" value={data.kpis.intake_today} href={`/inbox?startDate=${new Date().toISOString().slice(0, 10)}`} onNavigate={(href) => window.location.assign(href)} />
+          <Card title="Overdue Tasks" value={data.kpis.overdue_tasks} href="/tasks?view=overdue" onNavigate={(href) => window.location.assign(href)} />
           <Card title="Needs Review (all)" value={data.kpis.needs_review_total} href="/sale?status=needs_review" onNavigate={(href) => window.location.assign(href)} />
         </div>
 

@@ -218,6 +218,9 @@ export function CRMGrid({ type }: { type: GridType }) {
   const [drawer, setDrawer] = useState<{ open: boolean; loading: boolean; data: any | null }>({ open: false, loading: false, data: null });
   const [contactQuery, setContactQuery] = useState("");
   const [contactMatches, setContactMatches] = useState<Array<{ id: string; name: string; phone: string | null }>>([]);
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskDueDate, setTaskDueDate] = useState("");
+  const [taskAssignedTo, setTaskAssignedTo] = useState("");
 
   const [columnOrder, setColumnOrder] = useState<string[]>(columnsByType[type].map((c) => c.key));
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
@@ -411,6 +414,68 @@ export function CRMGrid({ type }: { type: GridType }) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return;
     setDrawer((prev) => (prev.data ? { ...prev, data: { ...prev.data, linked_contact: data.linked_contact, record: { ...prev.data.record, contact_id: data.linked_contact?.id } } } : prev));
+  }
+
+  function relatedTypeFromGridType(value: GridType): "sale" | "rent" | "buyer" | "client" {
+    if (value === "sale") return "sale";
+    if (value === "rent") return "rent";
+    if (value === "buyer") return "buyer";
+    return "client";
+  }
+
+  async function createTask(relatedType: "sale" | "rent" | "buyer" | "client" | "contact", relatedId: string) {
+    if (isViewer || !taskTitle.trim() || !relatedId) return;
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        related_type: relatedType,
+        related_id: relatedId,
+        title: taskTitle.trim(),
+        due_date: taskDueDate || null,
+        assigned_to: taskAssignedTo || null
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return;
+
+    setDrawer((prev) => {
+      if (!prev.data) return prev;
+      const key = relatedType === "contact" ? "contact_tasks" : "tasks";
+      return {
+        ...prev,
+        data: {
+          ...prev.data,
+          [key]: [data.task, ...((prev.data[key] || []) as any[])]
+        }
+      };
+    });
+    setTaskTitle("");
+    setTaskDueDate("");
+  }
+
+  async function updateTask(taskId: string, updates: Record<string, unknown>) {
+    if (isViewer) return;
+    const res = await fetch(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return;
+
+    setDrawer((prev) => {
+      if (!prev.data) return prev;
+      const patch = (arr: any[]) => arr.map((task) => (task.id === taskId ? { ...task, ...data.task } : task));
+      return {
+        ...prev,
+        data: {
+          ...prev.data,
+          tasks: patch(prev.data.tasks || []),
+          contact_tasks: patch(prev.data.contact_tasks || [])
+        }
+      };
+    });
   }
 
   function pinLeft(key: string) {
@@ -873,6 +938,77 @@ ${exportData.spreadsheetUrl || ""}`);
                       </div>
                     ))}
                   </div>
+                </div>
+
+                <div className="rounded border border-slate-200 p-3">
+                  <h4 className="mb-2 font-semibold">Tasks</h4>
+
+                  <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_140px_180px_auto]">
+                    <input
+                      value={taskTitle}
+                      onChange={(e) => setTaskTitle(e.target.value)}
+                      placeholder="Create task (e.g. Call buyer)"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs"
+                    />
+                    <input value={taskDueDate} onChange={(e) => setTaskDueDate(e.target.value)} type="datetime-local" className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                    <select value={taskAssignedTo} onChange={(e) => setTaskAssignedTo(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-xs">
+                      <option value="">Assign user</option>
+                      {(drawer.data.assignees || []).map((u: any) => (
+                        <option key={u.id} value={u.id}>{u.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      disabled={isViewer}
+                      onClick={() => createTask(relatedTypeFromGridType(type), drawer.data.record?.id)}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
+                    >
+                      Add Task
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {(drawer.data.tasks || []).map((task: any) => (
+                      <div key={task.id} className="rounded border border-slate-200 p-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-medium">{task.title}</p>
+                          <span className={`rounded px-2 py-0.5 ${task.status === "done" ? "bg-emerald-100 text-emerald-700" : task.status === "cancelled" ? "bg-slate-200 text-slate-600" : "bg-amber-100 text-amber-700"}`}>{task.status}</span>
+                        </div>
+                        <p className="text-slate-500">Assigned: {task.assigned_to_name || "Unassigned"} • Due: {task.due_date ? relTime(task.due_date) : "-"}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <button disabled={isViewer || task.status !== "open"} onClick={() => updateTask(task.id, { status: "done" })} className="rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Mark done</button>
+                          <input
+                            type="datetime-local"
+                            defaultValue={task.due_date ? new Date(task.due_date).toISOString().slice(0, 16) : ""}
+                            onBlur={(e) => updateTask(task.id, { due_date: e.target.value || null })}
+                            className="rounded border border-slate-300 px-2 py-1 text-[10px]"
+                          />
+                          <select defaultValue={task.assigned_to || ""} onChange={(e) => updateTask(task.id, { assigned_to: e.target.value || null })} className="rounded border border-slate-300 px-2 py-1 text-[10px]">
+                            <option value="">Unassigned</option>
+                            {(drawer.data.assignees || []).map((u: any) => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                    {(drawer.data.tasks || []).length === 0 && <p className="text-xs text-slate-500">No tasks yet.</p>}
+                  </div>
+
+                  {drawer.data.linked_contact?.id && (
+                    <div className="mt-3 border-t border-slate-200 pt-3">
+                      <p className="mb-2 text-xs font-semibold text-slate-600">Contact tasks</p>
+                      <button disabled={isViewer} onClick={() => createTask("contact", drawer.data.linked_contact.id)} className="mb-2 rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Add task to linked contact</button>
+                      <div className="space-y-1">
+                        {(drawer.data.contact_tasks || []).map((task: any) => (
+                          <div key={task.id} className="rounded border border-slate-200 p-2 text-[10px]">
+                            <p className="font-medium">{task.title}</p>
+                            <p className="text-slate-500">{task.status} • {task.assigned_to_name || "Unassigned"}</p>
+                          </div>
+                        ))}
+                        {(drawer.data.contact_tasks || []).length === 0 && <p className="text-[10px] text-slate-500">No contact tasks.</p>}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="rounded border border-slate-200 p-3">

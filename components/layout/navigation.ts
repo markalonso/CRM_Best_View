@@ -11,6 +11,7 @@ export const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Rent", href: "/rent" },
   { label: "Buyers", href: "/buyers" },
   { label: "Clients", href: "/clients" },
+  { label: "Tasks", href: "/tasks" },
   { label: "Media", href: "/media" },
   { label: "Dashboard", href: "/dashboard" },
   { label: "Reports", href: "/reports" },
