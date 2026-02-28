@@ -1,6 +1,6 @@
 "use client";
 
-import { DragEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { MediaSummary } from "./media-summary";
 import { MediaItem } from "./types";
 import { MediaViewerModal } from "./media-viewer-modal";
@@ -32,15 +32,15 @@ export function MediaManager({ intakeSessionId, recordType, recordId, compact = 
     return p.toString();
   }, [intakeSessionId, recordType, recordId]);
 
-  async function load() {
+  const load = useCallback(async () => {
     const res = await fetch(`/api/media?${query}`, { cache: "no-store" });
     const data = await res.json();
     setItems(data.media || []);
-  }
+  }, [query]);
 
   useEffect(() => {
     load();
-  }, [query]);
+  }, [load]);
 
   function onPick(next: File[]) {
     setWarning("");

@@ -15,6 +15,23 @@ type ReportFilters = {
   currency?: string;
 };
 
+type ReportRow = Record<string, string | number | string[] | undefined | null> & {
+  id?: string;
+  area?: string;
+  compound?: string;
+  status?: string;
+  furnished?: string;
+  finishing?: string;
+  source?: string;
+  currency?: string;
+  price?: string | number;
+  budget?: string | number;
+  budget_min?: string | number;
+  budget_max?: string | number;
+  preferred_areas?: string[];
+  created_at?: string;
+};
+
 type RunReportBody = {
   dataset?: Dataset;
   groupBy?: GroupBy;
@@ -151,10 +168,13 @@ export async function POST(request: NextRequest) {
 
   const groups = new Map<string, { count: number; nums: number[]; filterValue: string; currency?: string }>();
 
-  (data || []).forEach((row) => {
+  const reportRows = (data || []) as ReportRow[];
+
+  reportRows.forEach((rawRow) => {
+    const row = rawRow;
     const getBudget = () => {
       if (dataset !== "buyer") return null;
-      const b = num(row.budget_max || row.budget_min);
+      const b = num(row.budget_max ?? row.budget ?? row.budget_min);
       return b > 0 ? b : null;
     };
 
