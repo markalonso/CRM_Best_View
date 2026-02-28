@@ -216,6 +216,8 @@ export function CRMGrid({ type }: { type: GridType }) {
 
   const [editing, setEditing] = useState<{ rowId: string; key: string; value: string } | null>(null);
   const [drawer, setDrawer] = useState<{ open: boolean; loading: boolean; data: any | null }>({ open: false, loading: false, data: null });
+  const [contactQuery, setContactQuery] = useState("");
+  const [contactMatches, setContactMatches] = useState<Array<{ id: string; name: string; phone: string | null }>>([]);
 
   const [columnOrder, setColumnOrder] = useState<string[]>(columnsByType[type].map((c) => c.key));
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
@@ -369,6 +371,46 @@ export function CRMGrid({ type }: { type: GridType }) {
     const res = await fetch(`/api/grid/record-detail?type=${type}&id=${id}`, { cache: "no-store" });
     const data = await res.json();
     setDrawer({ open: true, loading: false, data });
+  }
+
+  async function searchContacts() {
+    const q = contactQuery.trim();
+    if (!q) {
+      setContactMatches([]);
+      return;
+    }
+    const res = await fetch(`/api/contacts?q=${encodeURIComponent(q)}`, { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return;
+    setContactMatches(data.contacts || []);
+  }
+
+  async function linkContact(contactId: string) {
+    if (!drawer.data?.record?.id) return;
+    const res = await fetch("/api/grid/record-detail", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, id: drawer.data.record.id, action: "link_existing_contact", contact_id: contactId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return;
+    setDrawer((prev) => (prev.data ? { ...prev, data: { ...prev.data, linked_contact: data.linked_contact, record: { ...prev.data.record, contact_id: data.linked_contact?.id } } } : prev));
+    setContactMatches([]);
+    setContactQuery("");
+  }
+
+  async function createContactFromDrawer() {
+    if (!drawer.data?.record?.id) return;
+    const name = window.prompt("Contact name") || "";
+    const phone = window.prompt("Contact phone (optional)") || "";
+    const res = await fetch("/api/grid/record-detail", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, id: drawer.data.record.id, action: "create_contact", name, phone })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return;
+    setDrawer((prev) => (prev.data ? { ...prev, data: { ...prev.data, linked_contact: data.linked_contact, record: { ...prev.data.record, contact_id: data.linked_contact?.id } } } : prev));
   }
 
   function pinLeft(key: string) {
@@ -831,6 +873,43 @@ ${exportData.spreadsheetUrl || ""}`);
                       </div>
                     ))}
                   </div>
+                </div>
+
+                <div className="rounded border border-slate-200 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="font-semibold">Linked Contact</h4>
+                    {drawer.data.linked_contact?.id && <span className="text-[10px] text-slate-500">{drawer.data.linked_contact.id.slice(0, 8)}</span>}
+                  </div>
+
+                  {drawer.data.linked_contact ? (
+                    <div className="mb-2 rounded border border-slate-200 p-2 text-xs">
+                      <p className="font-medium">{drawer.data.linked_contact.name || "Contact"}</p>
+                      <p className="text-slate-500">{drawer.data.linked_contact.phone || "No phone"}</p>
+                      <a href={`/clients?contact=${drawer.data.linked_contact.id}`} className="text-slate-400 underline">View contact</a>
+                    </div>
+                  ) : (
+                    <p className="mb-2 text-xs text-slate-500">No linked contact</p>
+                  )}
+
+                  <div className="mb-2 flex gap-2">
+                    <input
+                      value={contactQuery}
+                      onChange={(e) => setContactQuery(e.target.value)}
+                      placeholder="Search contact by name/phone"
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                    />
+                    <button onClick={searchContacts} className="rounded border border-slate-300 px-2 py-1 text-xs">Search</button>
+                  </div>
+
+                  <div className="mb-2 space-y-1">
+                    {contactMatches.map((contact) => (
+                      <button disabled={isViewer} key={contact.id} onClick={() => linkContact(contact.id)} className="block w-full rounded border border-slate-200 px-2 py-1 text-left text-xs hover:bg-slate-50 disabled:opacity-40">
+                        {contact.name || "Contact"} • {contact.phone || "No phone"}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button disabled={isViewer} onClick={createContactFromDrawer} className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40">Create new contact manually</button>
                 </div>
 
                 {Array.isArray(drawer.data.linked_records) && drawer.data.linked_records.length > 0 && (

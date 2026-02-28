@@ -1,5 +1,6 @@
 import "server-only";
 import { createSupabaseClient } from "@/services/supabase/client";
+import { resolveContactId } from "@/services/contacts/contact-linking.service";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client";
 type Mode = "create_new" | "update_existing";
@@ -264,6 +265,9 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   if (intake.status === "confirmed") throw new Error("Intake session already confirmed");
 
   const sanitized = sanitizeForType(input.type, input.extracted_data);
+  const contactNameCandidate = sanitized.name || input.extracted_data.contact_name || input.extracted_data.name;
+  const contactPhoneCandidate = sanitized.phone || input.extracted_data.contact_phone || input.extracted_data.phone;
+  const contactId = await resolveContactId({ name: contactNameCandidate, phone: contactPhoneCandidate });
   const missingCritical = computeMissingCritical(input.type, sanitized);
   const rowStatus: "active" | "needs_review" = missingCritical.length > 0 ? "needs_review" : "active";
 
@@ -274,13 +278,14 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     const code = await nextCode(codePrefixByType[input.type]);
     const { data, error } = await supabase
       .from(recordType)
-      .insert({ ...sanitized, code, status: rowStatus, intake_session_id: session_id })
+      .insert({ ...sanitized, contact_id: contactId, code, status: rowStatus, intake_session_id: session_id })
       .select("id")
       .single();
 
     if (error || !data) throw new Error(error?.message || "Create record failed");
     recordId = data.id;
     changedFields = Object.keys(sanitized);
+    if (contactId) changedFields.push("contact_id");
 
     await createTimelineEvent(recordType, recordId, "Record created from intake", { session_id, type: input.type, row_status: rowStatus });
   } else {
@@ -291,7 +296,10 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     const merged = mergeRow(existing as Record<string, unknown>, sanitized, input.merge_decisions);
     changedFields = merged.changedFields;
 
-    const { error: updateError } = await supabase.from(recordType).update({ ...merged.row, status: rowStatus }).eq("id", target_record_id);
+    const mergedWithContact = { ...merged.row, ...(contactId ? { contact_id: contactId } : {}) };
+    if (contactId && String(existing.contact_id || "") !== String(contactId)) changedFields.push("contact_id");
+
+    const { error: updateError } = await supabase.from(recordType).update({ ...mergedWithContact, status: rowStatus }).eq("id", target_record_id);
     if (updateError) throw new Error(updateError.message);
 
     recordId = target_record_id;
@@ -299,6 +307,9 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   }
 
   const mediaSummary = await moveMediaForSession(session_id, recordType, recordId);
+  if (contactId) {
+    await createTimelineEvent(recordType, recordId, "Linked to contact", { contact_id: contactId });
+  }
   await createTimelineEvent(recordType, recordId, `Media attached: ${mediaSummary.images} images, ${mediaSummary.videos} videos, ${mediaSummary.documents} documents`, {
     session_id,
     ...mediaSummary,

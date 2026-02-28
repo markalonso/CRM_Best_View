@@ -93,6 +93,18 @@ alter table intake_sessions add column if not exists final_record_type record_ty
 alter table intake_sessions add column if not exists final_record_id uuid;
 
 -- ---------- CLIENTS ----------
+create table if not exists contacts (
+  id uuid primary key default gen_random_uuid(),
+  name text not null default '',
+  phone text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create trigger trg_contacts_updated_at
+before update on contacts
+for each row execute function set_updated_at();
+
 create table if not exists clients (
   id uuid primary key default gen_random_uuid(),
   code text unique,
@@ -108,6 +120,7 @@ create table if not exists clients (
   tags text[] not null default '{}',
 
   intake_session_id uuid references intake_sessions(id) on delete set null,
+  contact_id uuid references contacts(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -144,6 +157,7 @@ create table if not exists properties_sale (
 
   intake_session_id uuid references intake_sessions(id) on delete set null,
   client_id uuid references clients(id) on delete set null,
+  contact_id uuid references contacts(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -180,6 +194,7 @@ create table if not exists properties_rent (
 
   intake_session_id uuid references intake_sessions(id) on delete set null,
   client_id uuid references clients(id) on delete set null,
+  contact_id uuid references contacts(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -214,9 +229,15 @@ create table if not exists buyers (
   notes text not null default '',
 
   intake_session_id uuid references intake_sessions(id) on delete set null,
+  contact_id uuid references contacts(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table properties_sale add column if not exists contact_id uuid references contacts(id) on delete set null;
+alter table properties_rent add column if not exists contact_id uuid references contacts(id) on delete set null;
+alter table buyers add column if not exists contact_id uuid references contacts(id) on delete set null;
+alter table clients add column if not exists contact_id uuid references contacts(id) on delete set null;
 
 create trigger trg_buyers_code
 before insert on buyers
@@ -315,6 +336,8 @@ create index if not exists idx_clients_code_trgm on clients using gin (code gin_
 create index if not exists idx_clients_name_trgm on clients using gin (name gin_trgm_ops);
 create index if not exists idx_buyers_notes_trgm on buyers using gin (notes gin_trgm_ops);
 create index if not exists idx_intake_raw_text_trgm on intake_sessions using gin (raw_text gin_trgm_ops);
+create index if not exists idx_contacts_phone on contacts(phone);
+create index if not exists idx_contacts_name_trgm on contacts using gin (name gin_trgm_ops);
 
 
 -- ---------- ROLES & PROFILES ----------
@@ -356,6 +379,7 @@ alter table properties_sale enable row level security;
 alter table properties_rent enable row level security;
 alter table buyers enable row level security;
 alter table clients enable row level security;
+alter table contacts enable row level security;
 alter table media enable row level security;
 alter table timeline enable row level security;
 alter table audit_logs enable row level security;
@@ -421,6 +445,15 @@ drop policy if exists clients_update_agent on clients;
 create policy clients_update_agent on clients for update using (current_app_role() in ('agent','admin')) with check (current_app_role() in ('agent','admin'));
 drop policy if exists clients_delete_admin on clients;
 create policy clients_delete_admin on clients for delete using (current_app_role() = 'admin');
+
+drop policy if exists contacts_read_all on contacts;
+create policy contacts_read_all on contacts for select using (current_app_role() in ('viewer','agent','admin'));
+drop policy if exists contacts_insert_agent on contacts;
+create policy contacts_insert_agent on contacts for insert with check (current_app_role() in ('agent','admin'));
+drop policy if exists contacts_update_agent on contacts;
+create policy contacts_update_agent on contacts for update using (current_app_role() in ('agent','admin')) with check (current_app_role() in ('agent','admin'));
+drop policy if exists contacts_delete_admin on contacts;
+create policy contacts_delete_admin on contacts for delete using (current_app_role() = 'admin');
 
 drop policy if exists media_read_all on media;
 create policy media_read_all on media for select using (current_app_role() in ('viewer','agent','admin'));

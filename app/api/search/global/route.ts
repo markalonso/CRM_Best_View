@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
 
-type SearchRecordType = "sale" | "rent" | "buyer" | "client" | "inbox" | "media";
+type SearchRecordType = "sale" | "rent" | "buyer" | "client" | "contact" | "inbox" | "media";
 
 type SearchItem = {
   id: string;
@@ -57,11 +57,12 @@ export async function GET(request: NextRequest) {
   const codeMode = /^(sale|rent|buyer|client|inbox|intake)-/i.test(q) || /(sale-|rent-|buyer-|client-)/i.test(q);
   const supabase = createSupabaseClient();
 
-  const [saleExact, rentExact, buyerExact, clientExact] = await Promise.all([
+  const [saleExact, rentExact, buyerExact, clientExact, contactExact] = await Promise.all([
     supabase.from("properties_sale").select("id, code, status, area, compound, price, currency, updated_at").or(`code.ilike.${qLike}${numericMode ? `,price.eq.${numberTerm || 0}` : ""}`).limit(LIMIT_PER_TYPE),
     supabase.from("properties_rent").select("id, code, status, area, compound, price, currency, updated_at").or(`code.ilike.${qLike}${numericMode ? `,price.eq.${numberTerm || 0}` : ""}`).limit(LIMIT_PER_TYPE),
     supabase.from("buyers").select("id, code, status, intent, property_type, budget_min, budget_max, currency, phone, updated_at").or(`code.ilike.${qLike},phone.ilike.${qLike}${numericMode ? `,budget_max.eq.${numberTerm || 0},budget_min.eq.${numberTerm || 0}` : ""}`).limit(LIMIT_PER_TYPE),
-    supabase.from("clients").select("id, code, status, name, role, phone, area, updated_at").or(`code.ilike.${qLike},name.ilike.${qLike},phone.ilike.${qLike}`).limit(LIMIT_PER_TYPE)
+    supabase.from("clients").select("id, code, status, name, role, phone, area, updated_at").or(`code.ilike.${qLike},name.ilike.${qLike},phone.ilike.${qLike}`).limit(LIMIT_PER_TYPE),
+    supabase.from("contacts").select("id, name, phone, updated_at").or(`name.ilike.${qLike},phone.ilike.${qLike}`).limit(LIMIT_PER_TYPE)
   ]);
 
   const [saleFuzzy, rentFuzzy, buyerFuzzy, clientFuzzy, inboxFuzzy] = await Promise.all([
@@ -76,6 +77,7 @@ export async function GET(request: NextRequest) {
   const rentRows = [...(rentExact.data || []), ...(rentFuzzy.data || [])].filter((row, i, arr) => arr.findIndex((x) => x.id === row.id) === i).slice(0, LIMIT_PER_TYPE);
   const buyerRows = [...(buyerExact.data || []), ...(buyerFuzzy.data || [])].filter((row, i, arr) => arr.findIndex((x) => x.id === row.id) === i).slice(0, LIMIT_PER_TYPE);
   const clientRows = [...(clientExact.data || []), ...(clientFuzzy.data || [])].filter((row, i, arr) => arr.findIndex((x) => x.id === row.id) === i).slice(0, LIMIT_PER_TYPE);
+  const contactRows = (contactExact.data || []).slice(0, LIMIT_PER_TYPE);
   const inboxRows = (inboxFuzzy.data || []).slice(0, LIMIT_PER_TYPE);
 
   const saleIds = saleRows.map((row) => String(row.id));
@@ -147,6 +149,17 @@ export async function GET(request: NextRequest) {
     href: `/clients?open=${row.id}`
   }));
 
+  const contactItems: SearchItem[] = contactRows.map((row) => ({
+    id: String(row.id),
+    record_type: "contact",
+    code: `CONTACT-${String(row.id).slice(0, 8)}`,
+    primary_label: String(row.name || "Contact"),
+    secondary_info: String(row.phone || "No phone"),
+    needs_review: false,
+    updated_at: String(row.updated_at || ""),
+    href: "/clients"
+  }));
+
   const inboxItems: SearchItem[] = inboxRows.map((row) => ({
     id: String(row.id),
     record_type: "inbox",
@@ -180,6 +193,7 @@ export async function GET(request: NextRequest) {
     { key: "rent", label: "Rent", items: rentItems },
     { key: "buyer", label: "Buyers", items: buyerItems },
     { key: "client", label: "Clients", items: clientItems },
+    { key: "contact", label: "Contacts", items: contactItems },
     { key: "inbox", label: "Inbox", items: inboxItems },
     { key: "media", label: "Media", items: mediaItems }
   ]
