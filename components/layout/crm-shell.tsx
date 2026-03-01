@@ -9,19 +9,34 @@ type CRMShellProps = {
   children: ReactNode;
 };
 
+type SearchResultItem = Record<string, any> & {
+  id: string;
+  href?: string;
+  record_type?: string;
+};
+
+type QuickActionItem = {
+  isAction: true;
+  id: string;
+  label: string;
+  href: string;
+};
+
+type FlatItem = SearchResultItem | QuickActionItem;
+
 export function CRMShell({ children }: CRMShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const [results, setResults] = useState<Array<{ key: string; label: string; count: number; items: Array<Record<string, any>> }>>([]);
+  const [results, setResults] = useState<Array<{ key: string; label: string; count: number; items: SearchResultItem[] }>>([]);
   const [quickActions, setQuickActions] = useState<Array<{ id: string; label: string; href: string }>>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const flatItems = useMemo(() => {
+  const flatItems = useMemo<FlatItem[]>(() => {
     const rows = results.flatMap((group) => group.items);
-    return [...rows, ...quickActions.map((action) => ({ ...action, isAction: true }))];
+    return [...rows, ...quickActions.map((action) => ({ ...action, isAction: true as const }))];
   }, [results, quickActions]);
 
   useEffect(() => {
@@ -57,13 +72,10 @@ export function CRMShell({ children }: CRMShellProps) {
     return () => clearTimeout(timer);
   }, [query, open]);
 
-  function runSelection(item: Record<string, any>) {
+  function runSelection(item: FlatItem) {
     setOpen(false);
-    if (item.isAction) {
-      router.push(item.href);
-      return;
-    }
-    router.push(String(item.href || "/"));
+    const href = typeof item.href === "string" ? item.href : "/";
+    router.push(href);
   }
 
   return (
@@ -145,7 +157,7 @@ export function CRMShell({ children }: CRMShellProps) {
                   <p className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-500">{group.label} ({group.count})</p>
                   <div className="space-y-1">
                     {group.items.map((item) => {
-                      const index = flatItems.findIndex((entry) => entry.id === item.id && entry.record_type === item.record_type);
+                      const index = flatItems.findIndex((entry) => entry.id === item.id && ("record_type" in entry ? entry.record_type : undefined) === item.record_type);
                       return (
                         <button key={`${item.record_type}-${item.id}`} onMouseDown={() => runSelection(item)} className={`block w-full rounded-lg px-2 py-2 text-left text-sm ${activeIndex === index ? "bg-slate-100" : "hover:bg-slate-50"}`}>
                           <div className="flex items-center justify-between gap-2">
