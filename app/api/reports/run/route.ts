@@ -42,6 +42,47 @@ type RunReportBody = {
   currency_target?: string;
 };
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isReportValue(v: unknown): v is string | number | string[] | undefined | null {
+  if (v == null) return true;
+  if (typeof v === "string" || typeof v === "number") return true;
+  return Array.isArray(v) && v.every((item) => typeof item === "string");
+}
+
+function normalizeReportRow(v: unknown): ReportRow | null {
+  if (!isPlainObject(v)) return null;
+
+  const reportKeys: Array<keyof ReportRow> = [
+    "id",
+    "area",
+    "compound",
+    "status",
+    "furnished",
+    "finishing",
+    "source",
+    "currency",
+    "price",
+    "budget",
+    "budget_min",
+    "budget_max",
+    "preferred_areas",
+    "created_at"
+  ];
+
+  const hasAnyReportKey = reportKeys.some((key) => key in v);
+  if (!hasAnyReportKey) return null;
+
+  const normalized: ReportRow = {};
+  Object.entries(v).forEach(([key, value]) => {
+    if (isReportValue(value)) normalized[key] = value;
+  });
+
+  return normalized;
+}
+
 function num(v: unknown) {
   const n = Number(v || 0);
   return Number.isFinite(n) ? n : 0;
@@ -168,7 +209,9 @@ export async function POST(request: NextRequest) {
 
   const groups = new Map<string, { count: number; nums: number[]; filterValue: string; currency?: string }>();
 
-  const reportRows = (data || []) as ReportRow[];
+  const reportRows: ReportRow[] = Array.isArray(data)
+    ? data.map((row) => normalizeReportRow(row)).filter((row): row is ReportRow => row !== null)
+    : [];
 
   reportRows.forEach((rawRow) => {
     const row = rawRow;
