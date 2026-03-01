@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { openai } from "./openai-client";
+import { getOpenAIClient } from "./openai-client";
 
 const classificationSchema = z.object({
   suggested_type: z.enum(["sale", "rent", "buyer", "client", "other"]),
@@ -11,7 +11,7 @@ export class IntakeAIService {
   private readonly model = "gpt-4o-mini";
 
   async classify(rawText: string) {
-    const completion = await openai.chat.completions.create({
+    const completion = await getOpenAIClient().chat.completions.create({
       model: this.model,
       temperature: 0,
       response_format: { type: "json_object" },

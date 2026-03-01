@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { buildMediaPath, detectMediaType, mediaStorageProvider } from "@/services/media/media-manager.service";
-import { env } from "@/lib/env";
+import { getIntegrationKey } from "@/lib/env";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 
 type InputMedia = { url?: string; type?: string; filename?: string };
@@ -72,7 +72,9 @@ async function fetchMedia(url: string) {
 
 export async function POST(request: NextRequest) {
   const key = request.headers.get("x-integration-key") || "";
-  if (!key || key !== env.INTEGRATION_KEY) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const integrationKey = getIntegrationKey();
+  if (!integrationKey) return NextResponse.json({ error: "Server misconfigured: missing INTEGRATION_KEY" }, { status: 500 });
+  if (!key || key !== integrationKey) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = (await request.json().catch(() => ({}))) as IntakeWebhookPayload;
   const payload = normalizePayload(body);

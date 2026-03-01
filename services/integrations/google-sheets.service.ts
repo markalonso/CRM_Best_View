@@ -1,5 +1,5 @@
 import { google, sheets_v4 } from "googleapis";
-import { env } from "@/lib/env";
+import { getEnv } from "@/lib/env";
 
 export type SheetDataset = "sale" | "rent" | "buyer" | "client" | "inbox";
 
@@ -18,6 +18,7 @@ function parseSpreadsheetId(value: string) {
 }
 
 function getAuth() {
+  const env = getEnv();
   if (!env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !env.GOOGLE_PRIVATE_KEY) {
     throw new Error("Missing Google service account configuration");
   }
@@ -41,6 +42,7 @@ export class GoogleSheetsIntegrationService {
 
   async ensureSpreadsheet(spreadsheetIdOrUrl?: string) {
     const sheets = this.getSheetsClient();
+    const env = getEnv();
     const parsed = parseSpreadsheetId(spreadsheetIdOrUrl || "") || env.GOOGLE_SHEETS_SPREADSHEET_ID || "";
 
     if (parsed) {

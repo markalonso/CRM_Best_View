@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { openai } from "@/services/ai/openai-client";
+import { getOpenAIClient } from "@/services/ai/openai-client";
 
 export type IntakeType = "sale" | "rent" | "buyer" | "client" | "other";
 
@@ -271,7 +271,7 @@ function extractFeatureNotes(text: string) {
 }
 
 async function completeJson(messages: { role: "system" | "user"; content: string }[]) {
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAIClient().chat.completions.create({
     model,
     temperature: 0,
     response_format: { type: "json_object" },

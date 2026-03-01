@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { getRequestActor } from "@/services/auth/role.service";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { getEnvSafe } from "@/lib/env";
 import { detectTypeAndLanguage, extractByType, validateAndNormalize, ExtractionParseError, type IntakeType } from "@/services/ai/intake-processing.service";
 
 const payloadSchema = z.object({
@@ -12,9 +13,19 @@ const payloadSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const supabase = createSupabaseClient();
-
   try {
+    const envState = getEnvSafe();
+    if (!envState.ok) {
+      if (envState.message.includes("SUPABASE_URL") || envState.message.includes("SUPABASE_ANON_KEY")) {
+        return NextResponse.json({ error: "Server misconfigured: missing SUPABASE URL/KEY" }, { status: 500 });
+      }
+      if (envState.message.includes("OPENAI_API_KEY")) {
+        return NextResponse.json({ error: "Server misconfigured: missing OPENAI_API_KEY" }, { status: 500 });
+      }
+      return NextResponse.json({ error: envState.message }, { status: 500 });
+    }
+
+    const supabase = createSupabaseClient();
     const actor = await getRequestActor(request);
     const key = actor.userId || request.headers.get("x-forwarded-for") || "anon";
     const rl = checkRateLimit(`ai:${key}`, 20, 60_000);
@@ -94,6 +105,14 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid payload", issues: error.issues }, { status: 400 });
+    }
+
+    if (error instanceof Error && error.message.includes("SUPABASE URL/KEY")) {
+      return NextResponse.json({ error: "Server misconfigured: missing SUPABASE URL/KEY" }, { status: 500 });
+    }
+
+    if (error instanceof Error && error.message.includes("OPENAI_API_KEY")) {
+      return NextResponse.json({ error: "Server misconfigured: missing OPENAI_API_KEY" }, { status: 500 });
     }
 
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unknown error" }, { status: 500 });

@@ -1,5 +1,17 @@
 import "server-only";
 import OpenAI from "openai";
-import { env } from "@/lib/env";
+import { getEnvSafe } from "@/lib/env";
 
-export const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+let cachedOpenAI: OpenAI | null = null;
+
+export function getOpenAIClient() {
+  if (cachedOpenAI) return cachedOpenAI;
+
+  const resolved = getEnvSafe();
+  if (!resolved.ok) {
+    throw new Error("Server misconfigured: missing OPENAI_API_KEY");
+  }
+
+  cachedOpenAI = new OpenAI({ apiKey: resolved.env.OPENAI_API_KEY });
+  return cachedOpenAI;
+}
