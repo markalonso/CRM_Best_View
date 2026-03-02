@@ -118,3 +118,8 @@ Validated in `lib/env.ts` with Zod.
 - Implemented dedicated prompt builders: `getSalePrompt()`, `getRentPrompt()`, `getBuyerPrompt()`, `getClientPrompt()`.
 - Extraction now validates against strict per-type schemas and applies deterministic normalization rules in `validateAndNormalize`.
 - If extraction JSON cannot be repaired, `/api/ai/process-intake` marks session `needs_review` and stores the error in `ai_meta`.
+
+
+## Netlify chunk verification
+
+See `docs/netlify-chunk-verification.md` for post-deploy checks to ensure `/_next/static/chunks/*.js` is served as JavaScript (200) and not rewritten to HTML.
