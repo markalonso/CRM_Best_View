@@ -28,3 +28,8 @@ curl -I https://<YOUR_DOMAIN>/_next/static/chunks/webpack-<hash>.js
 ```
 
 Expected: `200 OK` and JavaScript content type.
+
+
+Netlify deploy settings:
+- Do NOT set publish directory to `.next` when using `@netlify/plugin-nextjs`.
+- In Netlify UI, leave publish directory empty/default and clear cache before redeploy.
