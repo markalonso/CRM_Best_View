@@ -9,6 +9,12 @@ type IntakeType = "sale" | "rent" | "buyer" | "client" | "other" | "";
 
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
+  const actor = await getRequestActor(request);
+  if (!actor.userId) {
+    console.warn("[inbox/sessions] unauthorized GET", { hasSession: false });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
 
   const status = searchParams.get("status") as IntakeStatus | null;
@@ -30,7 +36,13 @@ export async function GET(request: NextRequest) {
   if (endDate) query = query.lte("created_at", new Date(endDate).toISOString());
 
   const { data: sessions, error } = await query;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    if (error.code === "42501") {
+      console.warn("[inbox/sessions] forbidden GET", { hasSession: true, userId: actor.userId });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
   const ids = (sessions || []).map((s) => s.id);
   const { data: mediaRows, error: mediaError } = ids.length
@@ -115,7 +127,14 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const supabase = createSupabaseClient();
   const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!actor.userId) {
+    console.warn("[inbox/sessions] unauthorized POST", { hasSession: false });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!hasRole(actor.role, "agent")) {
+    console.warn("[inbox/sessions] forbidden POST", { hasSession: true, userId: actor.userId, role: actor.role });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
   const formData = await request.formData();
   const rawText = String(formData.get("raw_text") || "").trim();
   const files = formData.getAll("files").filter((value): value is File => value instanceof File);
@@ -124,7 +143,7 @@ export async function POST(request: NextRequest) {
 
   const { data: session, error: sessionError } = await supabase
     .from("intake_sessions")
-    .insert({ raw_text: rawText, status: "draft", type_detected: "", type_confirmed: "", ai_json: {}, completeness_score: 0 })
+    .insert({ raw_text: rawText, status: "draft", type_detected: "", type_confirmed: "", ai_json: {}, completeness_score: 0, created_by: actor.userId })
     .select("id")
     .single();
 

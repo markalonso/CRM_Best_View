@@ -4,7 +4,7 @@ import Link from "next/link";
 import { MediaManager } from "@/components/media/media-manager";
 import { MediaSummary } from "@/components/media/media-summary";
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type IntakeStatus = "draft" | "needs_review" | "confirmed";
 type IntakeType = "sale" | "rent" | "buyer" | "client" | "other" | "";
@@ -54,6 +54,7 @@ function isAiStale(row: IntakeSessionRow | null) {
 }
 
 export default function InboxClient() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [rows, setRows] = useState<IntakeSessionRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,7 +75,14 @@ export default function InboxClient() {
   const [newRawText, setNewRawText] = useState("");
   const [newFiles, setNewFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
+  const [authError, setAuthError] = useState("");
 
+
+  function handleUnauthorized() {
+    setAuthError("Please sign in");
+    if (typeof window !== "undefined") window.alert("Please sign in");
+    router.replace("/auth/sign-in");
+  }
   const query = useMemo(() => {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
@@ -89,6 +97,13 @@ export default function InboxClient() {
   async function loadSessions(selectedId?: string) {
     setLoading(true);
     const res = await fetch(`/api/inbox/sessions?${query}`, { cache: "no-store" });
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+
     const data = await res.json();
     const sessions: IntakeSessionRow[] = data.sessions || [];
     setRows(sessions);
@@ -140,6 +155,12 @@ export default function InboxClient() {
       body: JSON.stringify({ intake_session_id: sessionId })
     });
 
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setAiStateById((prev) => ({ ...prev, [sessionId]: "error" }));
+      return;
+    }
+
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setAiStateById((prev) => ({ ...prev, [sessionId]: "error" }));
@@ -159,6 +180,11 @@ export default function InboxClient() {
     for (const file of newFiles) form.append("files", file);
 
     const res = await fetch("/api/inbox/sessions", { method: "POST", body: form });
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setSaving(false);
+      return;
+    }
     if (res.ok) {
       setShowModal(false);
       setNewRawText("");
@@ -179,6 +205,8 @@ export default function InboxClient() {
 
   return (
     <section className="relative grid grid-cols-[1fr_430px] gap-4">
+      {authError && <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-700">{authError}</div>}
+
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <h2 className="text-lg font-semibold">Inbox Intake Sessions</h2>

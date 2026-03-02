@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 type CRMShellProps = {
   children: ReactNode;
@@ -144,8 +145,16 @@ export function CRMShell({ children }: CRMShellProps) {
             <button className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
               Notifications
             </button>
-            <button className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
-              User Profile
+            <button
+              onClick={async () => {
+                const supabase = getSupabaseBrowserClient();
+                await supabase.auth.signOut();
+                router.replace("/auth/sign-in");
+                router.refresh();
+              }}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+            >
+              Logout
             </button>
           </div>
 

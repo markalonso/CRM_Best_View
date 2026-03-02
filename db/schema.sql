@@ -524,3 +524,70 @@ drop policy if exists audit_read_all on audit_logs;
 create policy audit_read_all on audit_logs for select using (current_app_role() in ('agent','admin'));
 drop policy if exists audit_write_agent on audit_logs;
 create policy audit_write_agent on audit_logs for insert with check (current_app_role() in ('agent','admin'));
+
+-- ---------- MVP AUTHENTICATED POLICIES (single-tenant temporary) ----------
+-- These policies allow any authenticated user to read/write CRM data.
+-- Keep for MVP; tighten later by created_by ownership and explicit roles.
+
+drop policy if exists intake_mvp_auth_select on intake_sessions;
+create policy intake_mvp_auth_select on intake_sessions for select using (auth.uid() is not null);
+drop policy if exists intake_mvp_auth_insert on intake_sessions;
+create policy intake_mvp_auth_insert on intake_sessions for insert with check (auth.uid() is not null);
+drop policy if exists intake_mvp_auth_update on intake_sessions;
+create policy intake_mvp_auth_update on intake_sessions for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists sale_mvp_auth_select on properties_sale;
+create policy sale_mvp_auth_select on properties_sale for select using (auth.uid() is not null);
+drop policy if exists sale_mvp_auth_insert on properties_sale;
+create policy sale_mvp_auth_insert on properties_sale for insert with check (auth.uid() is not null);
+drop policy if exists sale_mvp_auth_update on properties_sale;
+create policy sale_mvp_auth_update on properties_sale for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists rent_mvp_auth_select on properties_rent;
+create policy rent_mvp_auth_select on properties_rent for select using (auth.uid() is not null);
+drop policy if exists rent_mvp_auth_insert on properties_rent;
+create policy rent_mvp_auth_insert on properties_rent for insert with check (auth.uid() is not null);
+drop policy if exists rent_mvp_auth_update on properties_rent;
+create policy rent_mvp_auth_update on properties_rent for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists buyers_mvp_auth_select on buyers;
+create policy buyers_mvp_auth_select on buyers for select using (auth.uid() is not null);
+drop policy if exists buyers_mvp_auth_insert on buyers;
+create policy buyers_mvp_auth_insert on buyers for insert with check (auth.uid() is not null);
+drop policy if exists buyers_mvp_auth_update on buyers;
+create policy buyers_mvp_auth_update on buyers for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists clients_mvp_auth_select on clients;
+create policy clients_mvp_auth_select on clients for select using (auth.uid() is not null);
+drop policy if exists clients_mvp_auth_insert on clients;
+create policy clients_mvp_auth_insert on clients for insert with check (auth.uid() is not null);
+drop policy if exists clients_mvp_auth_update on clients;
+create policy clients_mvp_auth_update on clients for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists contacts_mvp_auth_select on contacts;
+create policy contacts_mvp_auth_select on contacts for select using (auth.uid() is not null);
+drop policy if exists contacts_mvp_auth_insert on contacts;
+create policy contacts_mvp_auth_insert on contacts for insert with check (auth.uid() is not null);
+drop policy if exists contacts_mvp_auth_update on contacts;
+create policy contacts_mvp_auth_update on contacts for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists media_mvp_auth_select on media;
+create policy media_mvp_auth_select on media for select using (auth.uid() is not null);
+drop policy if exists media_mvp_auth_insert on media;
+create policy media_mvp_auth_insert on media for insert with check (auth.uid() is not null);
+drop policy if exists media_mvp_auth_update on media;
+create policy media_mvp_auth_update on media for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists timeline_mvp_auth_select on timeline;
+create policy timeline_mvp_auth_select on timeline for select using (auth.uid() is not null);
+drop policy if exists timeline_mvp_auth_insert on timeline;
+create policy timeline_mvp_auth_insert on timeline for insert with check (auth.uid() is not null);
+drop policy if exists timeline_mvp_auth_update on timeline;
+create policy timeline_mvp_auth_update on timeline for update using (auth.uid() is not null) with check (auth.uid() is not null);
+
+drop policy if exists tasks_mvp_auth_select on tasks;
+create policy tasks_mvp_auth_select on tasks for select using (auth.uid() is not null);
+drop policy if exists tasks_mvp_auth_insert on tasks;
+create policy tasks_mvp_auth_insert on tasks for insert with check (auth.uid() is not null);
+drop policy if exists tasks_mvp_auth_update on tasks;
+create policy tasks_mvp_auth_update on tasks for update using (auth.uid() is not null) with check (auth.uid() is not null);

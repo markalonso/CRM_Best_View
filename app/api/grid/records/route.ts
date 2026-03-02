@@ -122,6 +122,9 @@ function mediaCount(row: Record<string, unknown>) {
 
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get("type") || "sale") as GridType;
   const page = Math.max(1, Number(searchParams.get("page") || "1"));
@@ -241,7 +244,10 @@ export async function GET(request: NextRequest) {
   const to = from + pageSize - 1;
 
   const { data, count, error } = await query.range(from, to);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    if (error.code === "42501") return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
   const safeRows = ((data || []) as unknown) as Array<Record<string, unknown>>;
   const ids = safeRows.map((r) => String(r.id || ""));
@@ -310,7 +316,8 @@ export async function GET(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const supabase = createSupabaseClient();
   const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   const body = (await request.json()) as { type: GridType; record_id: string; field: string; value: unknown };
 
   if (!body.type || !body.record_id || !body.field) return NextResponse.json({ error: "Missing fields" }, { status: 400 });

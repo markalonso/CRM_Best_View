@@ -14,16 +14,14 @@ const roleRank: Record<AppRole, number> = { viewer: 1, agent: 2, admin: 3 };
 function parseBearer(request: NextRequest) {
   const auth = request.headers.get("authorization") || "";
   if (auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
-  const cookie = request.cookies.get("sb-access-token")?.value;
-  return cookie || "";
+  return "";
 }
 
 export async function getRequestActor(request: NextRequest): Promise<RequestActor> {
   const supabase = createSupabaseClient();
-  const token = parseBearer(request);
-  if (!token) return { userId: null, role: "viewer", name: "Anonymous" };
+  const bearer = parseBearer(request);
 
-  const { data: authData } = await supabase.auth.getUser(token);
+  const { data: authData } = bearer ? await supabase.auth.getUser(bearer) : await supabase.auth.getUser();
   const user = authData.user;
   if (!user) return { userId: null, role: "viewer", name: "Anonymous" };
 

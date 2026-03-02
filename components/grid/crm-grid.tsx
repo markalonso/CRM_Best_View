@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
@@ -195,6 +195,7 @@ function csvEscape(value: unknown) {
 }
 
 export function CRMGrid({ type }: { type: GridType }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const { user } = useAuth();
   const isViewer = (user?.role || "viewer") === "viewer";
@@ -221,7 +222,14 @@ export function CRMGrid({ type }: { type: GridType }) {
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDueDate, setTaskDueDate] = useState("");
   const [taskAssignedTo, setTaskAssignedTo] = useState("");
+  const [authError, setAuthError] = useState("");
 
+
+  function handleUnauthorized() {
+    setAuthError("Please sign in");
+    if (typeof window !== "undefined") window.alert("Please sign in");
+    router.replace("/auth/sign-in");
+  }
   const [columnOrder, setColumnOrder] = useState<string[]>(columnsByType[type].map((c) => c.key));
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
   const [widths, setWidths] = useState<Record<string, number>>(() => Object.fromEntries(columnsByType[type].map((c) => [c.key, c.width || 140])));
@@ -251,6 +259,13 @@ export function CRMGrid({ type }: { type: GridType }) {
     });
 
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setRows([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     const data = await res.json();
     const incoming = (data.rows || []) as GridRow[];
 
@@ -532,6 +547,13 @@ export function CRMGrid({ type }: { type: GridType }) {
       filters: JSON.stringify(filters)
     });
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setRows([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     const data = await res.json();
     const exportRows = (data.rows || []) as GridRow[];
 
@@ -574,6 +596,13 @@ export function CRMGrid({ type }: { type: GridType }) {
     });
 
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
+    if (res.status === 401 || res.status === 403) {
+      handleUnauthorized();
+      setRows([]);
+      setTotal(0);
+      setLoading(false);
+      return;
+    }
     const data = await res.json();
     const rows = (data.rows || []) as Array<Record<string, unknown>>;
 
