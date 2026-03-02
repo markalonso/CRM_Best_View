@@ -19,3 +19,12 @@ If you see HTML or 404 for chunk URLs, check:
 - `netlify.toml` is using `@netlify/plugin-nextjs`
 - no SPA fallback redirects exist (`/* /index.html 200`)
 - app is built with `next build` (not `next export`)
+
+
+Example explicit check:
+
+```bash
+curl -I https://<YOUR_DOMAIN>/_next/static/chunks/webpack-<hash>.js
+```
+
+Expected: `200 OK` and JavaScript content type.
