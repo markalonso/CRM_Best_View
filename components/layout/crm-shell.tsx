@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
-import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type CRMShellProps = {
   children: ReactNode;
@@ -147,7 +147,7 @@ export function CRMShell({ children }: CRMShellProps) {
             </button>
             <button
               onClick={async () => {
-                const supabase = getSupabaseBrowserClient();
+                const supabase = createSupabaseBrowserClient();
                 await supabase.auth.signOut();
                 router.replace("/auth/sign-in");
                 router.refresh();

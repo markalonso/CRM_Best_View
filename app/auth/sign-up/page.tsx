@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
-import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export default function SignUpPage() {
   const router = useRouter();
@@ -17,8 +17,13 @@ export default function SignUpPage() {
     setLoading(true);
     setError("");
 
-    const supabase = getSupabaseBrowserClient();
-    const { error: signUpError } = await supabase.auth.signUp({ email, password });
+    const supabase = createSupabaseBrowserClient();
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: `${appUrl}/auth/callback` }
+    });
 
     if (signUpError) {
       setError(signUpError.message || "Unable to sign up");
@@ -26,10 +31,9 @@ export default function SignUpPage() {
       return;
     }
 
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-    if (signInError) {
-      setError(signInError.message || "Signed up, but failed to sign in");
+    if (!signUpData.session) {
       setLoading(false);
+      setError("Account created. Check your email to confirm, then sign in.");
       return;
     }
 

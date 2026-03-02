@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
-import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export default function SignInPage() {
   const router = useRouter();
@@ -17,7 +17,7 @@ export default function SignInPage() {
     setLoading(true);
     setError("");
 
-    const supabase = getSupabaseBrowserClient();
+    const supabase = createSupabaseBrowserClient();
     const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
 
     if (signInError) {
