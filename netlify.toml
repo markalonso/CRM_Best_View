@@ -5,30 +5,35 @@
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
-
-# 1) امنع كاش صفحات HTML نهائيًا (ده أهم سطرين لحل مشكلة 404 للchunks بعد نشر جديد)
+# 1) امنع كاش صفحات HTML نهائيًا (علشان مايحصلش mismatch بين HTML والـ chunks)
 [[headers]]
   for = "/*"
   [headers.values]
     Cache-Control = "no-store"
     Netlify-CDN-Cache-Control = "no-store"
 
-# 2) ملفات Next static تتكاش عادي (هي hashed)
+# 2) ملفات Next static (هاش) تتكاش عادي
 [[headers]]
   for = "/_next/static/*"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
-# 3) بيانات Next (لو موجودة) بدون كاش
+# 3) (لو Next data موجودة) خليها بدون كاش
 [[headers]]
   for = "/_next/data/*"
   [headers.values]
     Cache-Control = "no-store"
+    Netlify-CDN-Cache-Control = "no-store"
 
-
-# اختياري: لو في أي لينكات قديمة بتطلع بدون underscore
+# 4) اصلاح أي لينكات قديمة بتطلع بدون underscore
 [[redirects]]
   from = "/next/static/*"
   to = "/_next/static/:splat"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/next/data/*"
+  to = "/_next/data/:splat"
   status = 301
   force = true
