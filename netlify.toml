@@ -1,23 +1,34 @@
 [build]
   command = "npm run build"
+  publish = ".next"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
-# Repair any stale/incorrect asset URLs that omit the underscore.
+
+# 1) امنع كاش صفحات HTML نهائيًا (ده أهم سطرين لحل مشكلة 404 للchunks بعد نشر جديد)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cache-Control = "no-store"
+    Netlify-CDN-Cache-Control = "no-store"
+
+# 2) ملفات Next static تتكاش عادي (هي hashed)
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# 3) بيانات Next (لو موجودة) بدون كاش
+[[headers]]
+  for = "/_next/data/*"
+  [headers.values]
+    Cache-Control = "no-store"
+
+
+# اختياري: لو في أي لينكات قديمة بتطلع بدون underscore
 [[redirects]]
   from = "/next/static/*"
   to = "/_next/static/:splat"
   status = 301
   force = true
-
-# Cache policy: HTML/pages should revalidate, immutable Next build assets can be long-lived.
-[[headers]]
-  for = "/*"
-  [headers.values]
-    Cache-Control = "public, max-age=0, must-revalidate"
-
-[[headers]]
-  for = "/_next/static/*"
-  [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
