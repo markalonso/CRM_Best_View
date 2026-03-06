@@ -7,59 +7,101 @@ import { writeAuditLog } from "@/services/audit/audit-log.service";
 type IntakeStatus = "draft" | "needs_review" | "confirmed";
 type IntakeType = "sale" | "rent" | "buyer" | "client" | "other" | "";
 
+const INBOX_SESSION_SELECT = "id, parent_session_id, status, created_at, type_detected, type_confirmed, raw_text, ai_json, ai_meta, completeness_score";
+const INBOX_MEDIA_SELECT = "id, intake_session_id, file_url, media_type, mime_type, original_filename, file_size, created_at";
+
+function parseIsoDate(input: string) {
+  const parsed = new Date(input);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function toErrorDetails(error: unknown) {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const value = error as Record<string, unknown>;
+    return String(value.message || value.details || JSON.stringify(value));
+  }
+  return String(error);
+}
+
 export async function GET(request: NextRequest) {
-  const supabase = createSupabaseClient();
-  const actor = await getRequestActor(request);
-  if (!actor.userId) {
-    console.warn("[inbox/sessions] unauthorized GET", { hasSession: false });
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { searchParams } = new URL(request.url);
-
-  const status = searchParams.get("status") as IntakeStatus | null;
-  const type = searchParams.get("type") as IntakeType | null;
-  const hasMedia = searchParams.get("hasMedia");
-  const startDate = searchParams.get("startDate");
-  const endDate = searchParams.get("endDate");
-  const q = (searchParams.get("q") || "").trim().toLowerCase();
-
-  let query = supabase
-    .from("intake_sessions")
-    .select("id, parent_session_id, status, created_at, type_detected, type_confirmed, raw_text, ai_json, ai_meta, completeness_score")
-    .order("created_at", { ascending: false })
-    .limit(200);
-
-  if (status) query = query.eq("status", status);
-  if (type) query = query.eq("type_detected", type);
-  if (startDate) query = query.gte("created_at", new Date(startDate).toISOString());
-  if (endDate) query = query.lte("created_at", new Date(endDate).toISOString());
-
-  const { data: sessions, error } = await query;
-  if (error) {
-    if (error.code === "42501") {
-      console.warn("[inbox/sessions] forbidden GET", { hasSession: true, userId: actor.userId });
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  try {
+    const supabase = createSupabaseClient();
+    const actor = await getRequestActor(request);
+    const hasAuthHeader = Boolean(request.headers.get("authorization"));
+    const hasCookieHeader = Boolean(request.headers.get("cookie"));
+    console.info("[inbox/sessions] auth context", {
+      hasSessionHint: hasAuthHeader || hasCookieHeader,
+      hasUser: Boolean(actor.userId)
+    });
+    if (!actor.userId) {
+      console.warn("[inbox/sessions] unauthorized GET", { hasSession: hasAuthHeader || hasCookieHeader, hasUser: false });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
 
-  const ids = (sessions || []).map((s) => s.id);
-  const { data: mediaRows, error: mediaError } = ids.length
-    ? await supabase
-        .from("media")
-        .select("id, intake_session_id, file_url, media_type, mime_type, original_filename, file_size, created_at")
-        .in("intake_session_id", ids)
-    : { data: [], error: null };
+    const { searchParams } = new URL(request.url);
 
-  if (mediaError) return NextResponse.json({ error: mediaError.message }, { status: 500 });
+    const status = searchParams.get("status") as IntakeStatus | null;
+    const type = searchParams.get("type") as IntakeType | null;
+    const hasMedia = searchParams.get("hasMedia");
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const q = (searchParams.get("q") || "").trim().toLowerCase();
 
-  const mediaBySession = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of mediaRows || []) {
-    const list = mediaBySession.get(String(row.intake_session_id)) || [];
-    list.push(row as Record<string, unknown>);
-    mediaBySession.set(String(row.intake_session_id), list);
-  }
+    let query = supabase.from("intake_sessions").select(INBOX_SESSION_SELECT).order("created_at", { ascending: false }).limit(200);
+
+    if (status) query = query.eq("status", status);
+    if (type) query = query.eq("type_detected", type);
+    if (startDate) {
+      const parsedStartDate = parseIsoDate(startDate);
+      if (parsedStartDate) query = query.gte("created_at", parsedStartDate);
+      else console.warn("[inbox/sessions] ignoring invalid startDate", { startDate });
+    }
+    if (endDate) {
+      const parsedEndDate = parseIsoDate(endDate);
+      if (parsedEndDate) query = query.lte("created_at", parsedEndDate);
+      else console.warn("[inbox/sessions] ignoring invalid endDate", { endDate });
+    }
+
+    const { data: sessions, error } = await query;
+    if (error) {
+      console.error("[inbox/sessions] supabase query error (intake_sessions)", {
+        userId: actor.userId,
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint
+      });
+      if (error.code === "42501") {
+        console.warn("[inbox/sessions] forbidden GET", { hasSession: true, hasUser: true, userId: actor.userId });
+        return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      }
+      return NextResponse.json({ error: "Failed to load inbox sessions", details: toErrorDetails(error) }, { status: 500 });
+    }
+
+    const ids = (sessions || []).map((s) => s.id);
+    const { data: mediaRows, error: mediaError } = ids.length
+      ? await supabase.from("media").select(INBOX_MEDIA_SELECT).in("intake_session_id", ids)
+      : { data: [], error: null };
+
+    if (mediaError) {
+      console.error("[inbox/sessions] supabase query error (media)", {
+        userId: actor.userId,
+        code: mediaError.code,
+        message: mediaError.message,
+        details: mediaError.details,
+        hint: mediaError.hint
+      });
+      return NextResponse.json({ error: "Failed to load inbox sessions", details: toErrorDetails(mediaError) }, { status: 500 });
+    }
+
+    const mediaBySession = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of mediaRows || []) {
+      const list = mediaBySession.get(String(row.intake_session_id)) || [];
+      list.push(row as Record<string, unknown>);
+      mediaBySession.set(String(row.intake_session_id), list);
+    }
 
   let result = (sessions || []).map((session) => {
     const media = (mediaBySession.get(session.id) || []).map((m) => ({
@@ -117,11 +159,17 @@ export async function GET(request: NextRequest) {
       };
     });
 
-  if (parentIds.length === 0) {
-    return NextResponse.json({ sessions: result.map((row) => ({ ...row, children: [], child_count: 0, multi_listing: false })) });
-  }
+    if (parentIds.length === 0) {
+      return NextResponse.json({ sessions: result.map((row) => ({ ...row, children: [], child_count: 0, multi_listing: false })) });
+    }
 
-  return NextResponse.json({ sessions: parentsFirst });
+    return NextResponse.json({ sessions: parentsFirst });
+  } catch (error) {
+    console.error("[inbox/sessions] unexpected GET error", {
+      message: toErrorDetails(error)
+    });
+    return NextResponse.json({ error: "Failed to load inbox sessions", details: toErrorDetails(error) }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {
