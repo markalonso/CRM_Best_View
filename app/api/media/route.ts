@@ -68,18 +68,16 @@ export async function POST(request: NextRequest) {
     const mediaType = detectMediaType(file.type || "");
 
     records.push({
-      record_type: recordType || null,
-      record_id: recordId || null,
-      intake_session_id: intakeSessionId || null,
-      file_url: uploaded.publicUrl,
-      mime_type: file.type || "application/octet-stream",
-      media_type: mediaType,
-      type: mediaType,
-      original_filename: file.name,
-      file_size: file.size,
-      linked_record_type: recordType || null,
-      linked_record_id: recordId || null
-    });
+  record_type: recordType || null,
+  record_id: recordId || null,
+  intake_session_id: intakeSessionId || null,
+  storage_path: path,
+  file_url: uploaded.publicUrl,
+  mime_type: file.type || "application/octet-stream",
+  media_type: mediaType,
+  original_filename: file.name,
+  file_size: file.size
+});
   }
 
   if (records.length > 0) {
