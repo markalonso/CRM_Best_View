@@ -76,6 +76,7 @@ export default function InboxClient() {
   const [newFiles, setNewFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [saveMessage, setSaveMessage] = useState<{ type: "error" | "warning"; text: string } | null>(null);
 
 
   function handleUnauthorized() {
@@ -175,23 +176,46 @@ export default function InboxClient() {
   async function saveDraft() {
     if (!newRawText.trim()) return;
     setSaving(true);
-    const form = new FormData();
-    form.set("raw_text", newRawText);
-    for (const file of newFiles) form.append("files", file);
+    setSaveMessage(null);
 
-    const res = await fetch("/api/inbox/sessions", { method: "POST", body: form });
-    if (res.status === 401 || res.status === 403) {
-      handleUnauthorized();
-      setSaving(false);
-      return;
-    }
-    if (res.ok) {
+    try {
+      const createForm = new FormData();
+      createForm.set("raw_text", newRawText);
+
+      const createRes = await fetch("/api/inbox/sessions", { method: "POST", body: createForm });
+      if (createRes.status === 401 || createRes.status === 403) {
+        handleUnauthorized();
+        return;
+      }
+
+      const createData = await createRes.json().catch(() => ({}));
+      if (!createRes.ok || !createData.session_id) {
+        setSaveMessage({ type: "error", text: createData.error || "Failed to save intake draft" });
+        return;
+      }
+
+      const newSessionId = String(createData.session_id);
+
+      if (newFiles.length > 0) {
+        const mediaForm = new FormData();
+        mediaForm.set("intake_session_id", newSessionId);
+        for (const file of newFiles) mediaForm.append("files", file);
+
+        const mediaRes = await fetch("/api/media", { method: "POST", body: mediaForm });
+        const mediaData = await mediaRes.json().catch(() => ({}));
+
+        if (!mediaRes.ok) {
+          setSaveMessage({ type: "warning", text: `Intake saved, but media upload failed: ${mediaData.error || "Please retry from Media Manager."}` });
+        }
+      }
+
       setShowModal(false);
       setNewRawText("");
       setNewFiles([]);
-      await loadSessions();
+      await loadSessions(newSessionId);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   const selectedAiState = selected ? aiStateById[selected.id] || "idle" : "idle";
@@ -206,6 +230,11 @@ export default function InboxClient() {
   return (
     <section className="relative grid grid-cols-[1fr_430px] gap-4">
       {authError && <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-700">{authError}</div>}
+      {saveMessage && (
+        <div className={`rounded-lg px-4 py-2 text-sm ${saveMessage.type === "warning" ? "border border-amber-200 bg-amber-50 text-amber-800" : "border border-rose-200 bg-rose-50 text-rose-700"}`}>
+          {saveMessage.text}
+        </div>
+      )}
 
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
