@@ -2,7 +2,7 @@ import { createSupabaseClient } from "@/services/supabase/client";
 import { MediaStorageProvider, StorageUploadResult } from "./storage-provider";
 
 export class SupabaseMediaProvider implements MediaStorageProvider {
-  constructor(private readonly bucket = "crm-media") {}
+  constructor(private readonly bucket = "media") {}
 
   async upload(path: string, file: File): Promise<StorageUploadResult> {
     const supabase = createSupabaseClient();
