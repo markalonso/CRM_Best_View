@@ -16,7 +16,7 @@ type ConfirmInput = {
 };
 
 type ConfirmResult = {
-  recordType: "properties_sale" | "properties_rent" | "buyers" | "clients";
+  recordType: string;
   recordId: string;
   status: "active" | "needs_review";
   changedFields: string[];
@@ -71,10 +71,16 @@ function normalizePhone(value: unknown) {
 function parseStoragePathFromPublicUrl(url: string) {
   try {
     const u = new URL(url);
-    const marker = "/object/public/crm-media/";
-    const idx = u.pathname.indexOf(marker);
-    if (idx === -1) return "";
-    return decodeURIComponent(u.pathname.slice(idx + marker.length));
+    const markers = ["/object/public/crm-media/", "/object/public/media/"];
+
+    for (const marker of markers) {
+      const idx = u.pathname.indexOf(marker);
+      if (idx !== -1) {
+        return decodeURIComponent(u.pathname.slice(idx + marker.length));
+      }
+    }
+
+    return "";
   } catch {
     return "";
   }
@@ -164,13 +170,13 @@ async function nextCode(prefix: string) {
   return `${prefix}-${year}-${String(next).padStart(5, "0")}`;
 }
 
-export async function createTimelineEvent(record_type: "properties_sale" | "properties_rent" | "buyers" | "clients", record_id: string, action: string, details: Record<string, unknown>) {
+export async function createTimelineEvent(record_type: string, record_id: string, action: string, details: Record<string, unknown>) {
   const supabase = createSupabaseClient();
   const { error } = await supabase.from("timeline").insert({ record_type, record_id, action, details });
   if (error) throw new Error(error.message);
 }
 
-export async function moveMediaForSession(session_id: string, record_type: "properties_sale" | "properties_rent" | "buyers" | "clients", record_id: string) {
+export async function moveMediaForSession(session_id: string, record_type: string, record_id: string) {
   const supabase = createSupabaseClient();
   const { data: mediaRows, error } = await supabase
     .from("media")
@@ -184,6 +190,10 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
   let documents = 0;
 
   for (const row of mediaRows || []) {
+    if (row.media_type === "image") images += 1;
+    else if (row.media_type === "video") videos += 1;
+    else documents += 1;
+
     const sourcePath = parseStoragePathFromPublicUrl(String(row.file_url || ""));
     if (!sourcePath) {
       warnings.push(`Path parse failed for media ${row.id}`);
@@ -198,32 +208,83 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
       const copyResult = await supabase.storage.from("crm-media").copy(sourcePath, destinationPath);
       if (copyResult.error) {
         warnings.push(`Move/copy failed for media ${row.id}`);
-      } else {
-        warnings.push(`Move failed; copied instead for media ${row.id}`);
+        continue;
       }
+      warnings.push(`Move failed; copied instead for media ${row.id}`);
     }
 
     const { data: urlData } = supabase.storage.from("crm-media").getPublicUrl(destinationPath);
-
-    const { error: mediaUpdateError } = await supabase
+    const { error: mediaUrlUpdateError } = await supabase
       .from("media")
-      .update({
-        record_type,
-        record_id,
-        linked_record_type: record_type,
-        linked_record_id: record_id,
-        file_url: urlData.publicUrl
-      })
+      .update({ file_url: urlData.publicUrl })
       .eq("id", row.id);
 
-    if (mediaUpdateError) warnings.push(`Media row update failed ${row.id}`);
-
-    if (row.media_type === "image") images += 1;
-    else if (row.media_type === "video") videos += 1;
-    else documents += 1;
+    if (mediaUrlUpdateError) warnings.push(`Media URL update failed ${row.id}: ${mediaUrlUpdateError.message}`);
   }
 
+
   return { images, videos, documents, moveWarnings: warnings };
+}
+
+
+async function linkMediaRowsToRecord(session_id: string, record_type: string, record_id: string) {
+  const supabase = createSupabaseClient();
+
+  const { count: rowsBeforeUpdate, error: beforeCountError } = await supabase
+    .from("media")
+    .select("id", { count: "exact", head: true })
+    .eq("intake_session_id", session_id);
+
+  const mediaRowsBeforeUpdate = rowsBeforeUpdate || 0;
+  if (beforeCountError) {
+    console.error("[confirm-intake] media count before linkage failed", {
+      intake_session_id: session_id,
+      final_record_type: record_type,
+      final_record_id: record_id,
+      update_error: beforeCountError.message
+    });
+  }
+
+  console.info("[confirm-intake] linking media rows", {
+    intake_session_id: session_id,
+    final_record_type: record_type,
+    final_record_id: record_id,
+    media_rows_before_update: mediaRowsBeforeUpdate
+  });
+
+  const { data: linkedRows, error } = await supabase
+    .from("media")
+    .update({
+      record_type,
+      record_id
+    })
+    .eq("intake_session_id", session_id)
+    .select("id");
+
+  const mediaRowsUpdated = linkedRows?.length || 0;
+
+  if (error) {
+    console.error("[confirm-intake] media linkage update failed", {
+      intake_session_id: session_id,
+      final_record_type: record_type,
+      final_record_id: record_id,
+      media_rows_before_update: mediaRowsBeforeUpdate,
+      media_rows_updated: mediaRowsUpdated,
+      update_error: error.message
+    });
+    throw new Error(error.message);
+  }
+
+  console.info("[confirm-intake] media linkage update complete", {
+    intake_session_id: session_id,
+    final_record_type: record_type,
+    final_record_id: record_id,
+    media_rows_before_update: mediaRowsBeforeUpdate,
+    media_rows_updated: mediaRowsUpdated,
+    update_error: null
+  });
+
+  return mediaRowsUpdated;
 }
 
 function mergeRow(existing: Record<string, unknown>, incoming: Record<string, unknown>, merge: Record<string, MergeMode>) {
@@ -306,12 +367,44 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await createTimelineEvent(recordType, recordId, "Record updated from intake", { session_id, changed_fields: changedFields, row_status: rowStatus });
   }
 
-  const mediaSummary = await moveMediaForSession(session_id, recordType, recordId);
+  let linkedMediaCount = 0;
+  try {
+    linkedMediaCount = await linkMediaRowsToRecord(session_id, recordType, recordId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown media linkage update error";
+    console.error("[confirm-intake] media linkage update failed after record creation", {
+      intake_session_id: session_id,
+      final_record_type: recordType,
+      final_record_id: recordId,
+      error: message
+    });
+  }
+
+  let mediaSummary: { images: number; videos: number; documents: number; moveWarnings: string[] } = {
+    images: 0,
+    videos: 0,
+    documents: 0,
+    moveWarnings: []
+  };
+
+  try {
+    mediaSummary = await moveMediaForSession(session_id, recordType, recordId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown media linkage error";
+    console.error("[confirm-intake] media linkage failed after record creation", {
+      session_id,
+      recordType,
+      recordId,
+      error: message
+    });
+    mediaSummary.moveWarnings.push(`Media linkage failed after record creation: ${message}`);
+  }
   if (contactId) {
     await createTimelineEvent(recordType, recordId, "Linked to contact", { contact_id: contactId });
   }
   await createTimelineEvent(recordType, recordId, `Media attached: ${mediaSummary.images} images, ${mediaSummary.videos} videos, ${mediaSummary.documents} documents`, {
     session_id,
+    linked_media_rows: linkedMediaCount,
     ...mediaSummary,
     warning: mediaSummary.moveWarnings.length > 0
   });
