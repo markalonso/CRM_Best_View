@@ -16,7 +16,7 @@ type ConfirmInput = {
 };
 
 type ConfirmResult = {
-  recordType: "properties_sale" | "properties_rent" | "buyers" | "clients";
+  recordType: string;
   recordId: string;
   status: "active" | "needs_review";
   changedFields: string[];
@@ -170,13 +170,13 @@ async function nextCode(prefix: string) {
   return `${prefix}-${year}-${String(next).padStart(5, "0")}`;
 }
 
-export async function createTimelineEvent(record_type: "properties_sale" | "properties_rent" | "buyers" | "clients", record_id: string, action: string, details: Record<string, unknown>) {
+export async function createTimelineEvent(record_type: string, record_id: string, action: string, details: Record<string, unknown>) {
   const supabase = createSupabaseClient();
   const { error } = await supabase.from("timeline").insert({ record_type, record_id, action, details });
   if (error) throw new Error(error.message);
 }
 
-export async function moveMediaForSession(session_id: string, record_type: "properties_sale" | "properties_rent" | "buyers" | "clients", record_id: string) {
+export async function moveMediaForSession(session_id: string, record_type: string, record_id: string) {
   const supabase = createSupabaseClient();
   const { data: mediaRows, error } = await supabase
     .from("media")
@@ -222,7 +222,20 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
     if (mediaUrlUpdateError) warnings.push(`Media URL update failed ${row.id}: ${mediaUrlUpdateError.message}`);
   }
 
-  const { error: linkError } = await supabase
+
+  return { images, videos, documents, moveWarnings: warnings };
+}
+
+
+async function linkMediaRowsToRecord(session_id: string, record_type: string, record_id: string) {
+  const supabase = createSupabaseClient();
+  console.info("[confirm-intake] linking media rows", {
+    intake_session_id: session_id,
+    final_record_type: record_type,
+    final_record_id: record_id
+  });
+
+  const { data: linkedRows, error } = await supabase
     .from("media")
     .update({
       record_type,
@@ -230,13 +243,28 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
       linked_record_type: record_type,
       linked_record_id: record_id
     })
-    .eq("intake_session_id", session_id);
+    .eq("intake_session_id", session_id)
+    .select("id");
 
-  if (linkError) {
-    warnings.push(`Media linkage update failed for intake session ${session_id}: ${linkError.message}`);
+  if (error) {
+    console.error("[confirm-intake] media linkage update failed", {
+      intake_session_id: session_id,
+      final_record_type: record_type,
+      final_record_id: record_id,
+      error: error.message
+    });
+    throw new Error(error.message);
   }
 
-  return { images, videos, documents, moveWarnings: warnings };
+  const updatedCount = linkedRows?.length || 0;
+  console.info("[confirm-intake] media linkage update complete", {
+    intake_session_id: session_id,
+    final_record_type: record_type,
+    final_record_id: record_id,
+    media_rows_updated: updatedCount
+  });
+
+  return updatedCount;
 }
 
 function mergeRow(existing: Record<string, unknown>, incoming: Record<string, unknown>, merge: Record<string, MergeMode>) {
@@ -319,6 +347,19 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await createTimelineEvent(recordType, recordId, "Record updated from intake", { session_id, changed_fields: changedFields, row_status: rowStatus });
   }
 
+  let linkedMediaCount = 0;
+  try {
+    linkedMediaCount = await linkMediaRowsToRecord(session_id, recordType, recordId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown media linkage update error";
+    console.error("[confirm-intake] media linkage update failed after record creation", {
+      intake_session_id: session_id,
+      final_record_type: recordType,
+      final_record_id: recordId,
+      error: message
+    });
+  }
+
   let mediaSummary: { images: number; videos: number; documents: number; moveWarnings: string[] } = {
     images: 0,
     videos: 0,
@@ -343,6 +384,7 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   }
   await createTimelineEvent(recordType, recordId, `Media attached: ${mediaSummary.images} images, ${mediaSummary.videos} videos, ${mediaSummary.documents} documents`, {
     session_id,
+    linked_media_rows: linkedMediaCount,
     ...mediaSummary,
     warning: mediaSummary.moveWarnings.length > 0
   });
