@@ -71,10 +71,16 @@ function normalizePhone(value: unknown) {
 function parseStoragePathFromPublicUrl(url: string) {
   try {
     const u = new URL(url);
-    const marker = "/object/public/crm-media/";
-    const idx = u.pathname.indexOf(marker);
-    if (idx === -1) return "";
-    return decodeURIComponent(u.pathname.slice(idx + marker.length));
+    const markers = ["/object/public/crm-media/", "/object/public/media/"];
+
+    for (const marker of markers) {
+      const idx = u.pathname.indexOf(marker);
+      if (idx !== -1) {
+        return decodeURIComponent(u.pathname.slice(idx + marker.length));
+      }
+    }
+
+    return "";
   } catch {
     return "";
   }
@@ -184,6 +190,10 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
   let documents = 0;
 
   for (const row of mediaRows || []) {
+    if (row.media_type === "image") images += 1;
+    else if (row.media_type === "video") videos += 1;
+    else documents += 1;
+
     const sourcePath = parseStoragePathFromPublicUrl(String(row.file_url || ""));
     if (!sourcePath) {
       warnings.push(`Path parse failed for media ${row.id}`);
@@ -198,29 +208,32 @@ export async function moveMediaForSession(session_id: string, record_type: "prop
       const copyResult = await supabase.storage.from("crm-media").copy(sourcePath, destinationPath);
       if (copyResult.error) {
         warnings.push(`Move/copy failed for media ${row.id}`);
-      } else {
-        warnings.push(`Move failed; copied instead for media ${row.id}`);
+        continue;
       }
+      warnings.push(`Move failed; copied instead for media ${row.id}`);
     }
 
     const { data: urlData } = supabase.storage.from("crm-media").getPublicUrl(destinationPath);
-
-    const { error: mediaUpdateError } = await supabase
+    const { error: mediaUrlUpdateError } = await supabase
       .from("media")
-      .update({
-        record_type,
-        record_id,
-        linked_record_type: record_type,
-        linked_record_id: record_id,
-        file_url: urlData.publicUrl
-      })
+      .update({ file_url: urlData.publicUrl })
       .eq("id", row.id);
 
-    if (mediaUpdateError) warnings.push(`Media row update failed ${row.id}`);
+    if (mediaUrlUpdateError) warnings.push(`Media URL update failed ${row.id}: ${mediaUrlUpdateError.message}`);
+  }
 
-    if (row.media_type === "image") images += 1;
-    else if (row.media_type === "video") videos += 1;
-    else documents += 1;
+  const { error: linkError } = await supabase
+    .from("media")
+    .update({
+      record_type,
+      record_id,
+      linked_record_type: record_type,
+      linked_record_id: record_id
+    })
+    .eq("intake_session_id", session_id);
+
+  if (linkError) {
+    warnings.push(`Media linkage update failed for intake session ${session_id}: ${linkError.message}`);
   }
 
   return { images, videos, documents, moveWarnings: warnings };
@@ -306,7 +319,25 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await createTimelineEvent(recordType, recordId, "Record updated from intake", { session_id, changed_fields: changedFields, row_status: rowStatus });
   }
 
-  const mediaSummary = await moveMediaForSession(session_id, recordType, recordId);
+  let mediaSummary: { images: number; videos: number; documents: number; moveWarnings: string[] } = {
+    images: 0,
+    videos: 0,
+    documents: 0,
+    moveWarnings: []
+  };
+
+  try {
+    mediaSummary = await moveMediaForSession(session_id, recordType, recordId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown media linkage error";
+    console.error("[confirm-intake] media linkage failed after record creation", {
+      session_id,
+      recordType,
+      recordId,
+      error: message
+    });
+    mediaSummary.moveWarnings.push(`Media linkage failed after record creation: ${message}`);
+  }
   if (contactId) {
     await createTimelineEvent(recordType, recordId, "Linked to contact", { contact_id: contactId });
   }
