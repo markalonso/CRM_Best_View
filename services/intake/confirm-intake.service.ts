@@ -229,42 +229,62 @@ export async function moveMediaForSession(session_id: string, record_type: strin
 
 async function linkMediaRowsToRecord(session_id: string, record_type: string, record_id: string) {
   const supabase = createSupabaseClient();
+
+  const { count: rowsBeforeUpdate, error: beforeCountError } = await supabase
+    .from("media")
+    .select("id", { count: "exact", head: true })
+    .eq("intake_session_id", session_id);
+
+  const mediaRowsBeforeUpdate = rowsBeforeUpdate || 0;
+  if (beforeCountError) {
+    console.error("[confirm-intake] media count before linkage failed", {
+      intake_session_id: session_id,
+      final_record_type: record_type,
+      final_record_id: record_id,
+      update_error: beforeCountError.message
+    });
+  }
+
   console.info("[confirm-intake] linking media rows", {
     intake_session_id: session_id,
     final_record_type: record_type,
-    final_record_id: record_id
+    final_record_id: record_id,
+    media_rows_before_update: mediaRowsBeforeUpdate
   });
 
   const { data: linkedRows, error } = await supabase
     .from("media")
     .update({
       record_type,
-      record_id,
-      linked_record_type: record_type,
-      linked_record_id: record_id
+      record_id
     })
     .eq("intake_session_id", session_id)
     .select("id");
+
+  const mediaRowsUpdated = linkedRows?.length || 0;
 
   if (error) {
     console.error("[confirm-intake] media linkage update failed", {
       intake_session_id: session_id,
       final_record_type: record_type,
       final_record_id: record_id,
-      error: error.message
+      media_rows_before_update: mediaRowsBeforeUpdate,
+      media_rows_updated: mediaRowsUpdated,
+      update_error: error.message
     });
     throw new Error(error.message);
   }
 
-  const updatedCount = linkedRows?.length || 0;
   console.info("[confirm-intake] media linkage update complete", {
     intake_session_id: session_id,
     final_record_type: record_type,
     final_record_id: record_id,
-    media_rows_updated: updatedCount
+    media_rows_before_update: mediaRowsBeforeUpdate,
+    media_rows_updated: mediaRowsUpdated,
+    update_error: null
   });
 
-  return updatedCount;
+  return mediaRowsUpdated;
 }
 
 function mergeRow(existing: Record<string, unknown>, incoming: Record<string, unknown>, merge: Record<string, MergeMode>) {
