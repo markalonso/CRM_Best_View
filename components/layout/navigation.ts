@@ -18,4 +18,8 @@ export const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Integrations", href: "/integrations/sheets" }
 ];
 
+export const ADMIN_SIDEBAR_ITEMS: NavItem[] = [
+  { label: "Hierarchy", href: "/admin/hierarchy" }
+];
+
 export const VIEW_MODES = ["Grid", "Kanban", "Dashboard", "Map"] as const;

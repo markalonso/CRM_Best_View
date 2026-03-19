@@ -52,6 +52,22 @@ type GridFilters = {
 type GridTable = "properties_sale" | "properties_rent" | "buyers" | "clients" | "contacts" | "intake_sessions";
 type MapEntry = { table: GridTable; select: string };
 
+type HierarchyFamily = "sale" | "rent" | "buyers" | "clients";
+
+const hierarchyFamilyByType: Record<GridType, HierarchyFamily> = {
+  sale: "sale",
+  rent: "rent",
+  buyer: "buyers",
+  client: "clients"
+};
+
+const recordLinkColumnByType: Record<GridType, "sale_id" | "rent_id" | "buyer_id" | "client_id"> = {
+  sale: "sale_id",
+  rent: "rent_id",
+  buyer: "buyer_id",
+  client: "client_id"
+};
+
 const map: Record<string, MapEntry> = {
   sale: {
     table: "properties_sale",
@@ -115,6 +131,44 @@ function startOfWeekIso() {
   return weekStart.toISOString();
 }
 
+async function resolveHierarchyRecordIds(supabase: ReturnType<typeof createSupabaseClient>, type: GridType, nodeId: string) {
+  const family = hierarchyFamilyByType[type];
+  const linkColumn = recordLinkColumnByType[type];
+
+  const { data: node, error: nodeError } = await supabase
+    .from("hierarchy_nodes")
+    .select("id,family")
+    .eq("id", nodeId)
+    .single();
+
+  if (nodeError || !node) {
+    throw new Error(nodeError?.message || "Hierarchy node not found");
+  }
+  if (String(node.family) !== family) {
+    throw new Error(`Hierarchy node family ${String(node.family)} does not match grid type ${type}`);
+  }
+
+  const { data: closureRows, error: closureError } = await supabase
+    .from("hierarchy_node_closure")
+    .select("descendant_id")
+    .eq("ancestor_id", nodeId);
+
+  if (closureError) throw new Error(closureError.message);
+
+  const descendantIds = (closureRows || []).map((row) => String(row.descendant_id || "")).filter(Boolean);
+  if (descendantIds.length === 0) return [];
+
+  const { data: linkRows, error: linkError } = await supabase
+    .from("record_hierarchy_links")
+    .select(linkColumn)
+    .in("node_id", descendantIds)
+    .not(linkColumn, "is", null);
+
+  if (linkError) throw new Error(linkError.message);
+
+  return (linkRows || []).map((row) => String((row as Record<string, unknown>)[linkColumn] || "")).filter(Boolean);
+}
+
 function mediaCount(row: Record<string, unknown>) {
   const counts = (row.media_counts || { images: 0, videos: 0, documents: 0 }) as { images: number; videos: number; documents: number };
   return counts.images + counts.videos + counts.documents;
@@ -131,11 +185,20 @@ export async function GET(request: NextRequest) {
   const pageSize = Math.min(3000, Math.max(10, Number(searchParams.get("pageSize") || "20")));
   const sort = parseSort(searchParams.get("sort") || "updated_at:desc");
   const filters = parseFilters(searchParams.get("filters"));
+  const hierarchyNodeId = String(searchParams.get("nodeId") || "").trim();
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
 
   let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
+
+  if (hierarchyNodeId) {
+    const recordIds = await resolveHierarchyRecordIds(supabase, type, hierarchyNodeId);
+    if (recordIds.length === 0) {
+      return NextResponse.json({ rows: [], total: 0, page, pageSize });
+    }
+    query = query.in("id", recordIds);
+  }
 
   if (filters.search) {
     const s = filters.search.replace(/,/g, " ").trim();

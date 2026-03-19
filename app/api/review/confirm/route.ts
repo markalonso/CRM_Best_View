@@ -1,26 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { confirmIntakeSession } from "@/services/intake/confirm-intake.service";
 import { getRequestActor, hasRole } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 
-type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
-type Mode = "create_new" | "update_existing";
-type MergeMode = "keep_existing" | "replace_with_new" | "append";
-
-type Payload = {
-  intakeSessionId: string;
-  type: ReviewType;
-  mode: Mode;
-  selectedRecordId?: string;
-  extractedData: Record<string, unknown>;
-  mergeDecisions: Record<string, MergeMode>;
-};
+const payloadSchema = z.object({
+  intakeSessionId: z.string().uuid(),
+  type: z.enum(["sale", "rent", "buyer", "client", "other"]),
+  mode: z.enum(["create_new", "update_existing"]),
+  selectedRecordId: z.string().uuid().optional(),
+  extractedData: z.record(z.string(), z.unknown()).default({}),
+  mergeDecisions: z.record(z.string(), z.enum(["keep_existing", "replace_with_new", "append"])) .default({}),
+  hierarchyNodeId: z.string().uuid().optional(),
+  customFieldValues: z.array(
+    z.object({
+      fieldKey: z.string().trim().min(1).max(100),
+      value: z.union([z.string(), z.number(), z.boolean(), z.array(z.unknown()), z.record(z.string(), z.unknown()), z.null()])
+    })
+  ).default([])
+});
 
 export async function POST(request: NextRequest) {
   try {
     const actor = await getRequestActor(request);
     if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    const payload = (await request.json()) as Payload;
+    const payload = payloadSchema.parse(await request.json());
 
     if (!payload.intakeSessionId || !payload.type || payload.type === "other") {
       return NextResponse.json({ error: "Unsupported type or missing intakeSessionId" }, { status: 400 });
@@ -29,7 +33,9 @@ export async function POST(request: NextRequest) {
     const result = await confirmIntakeSession(payload.intakeSessionId, payload.mode, payload.selectedRecordId, {
       type: payload.type,
       extracted_data: payload.extractedData || {},
-      merge_decisions: payload.mergeDecisions || {}
+      merge_decisions: payload.mergeDecisions || {},
+      hierarchy_node_id: payload.hierarchyNodeId,
+      custom_field_values: payload.customFieldValues || []
     });
 
     await writeAuditLog({
@@ -44,6 +50,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid payload", issues: error.issues }, { status: 400 });
+    }
     const message = error instanceof Error ? error.message : "Unknown error";
     if (message.includes("already confirmed")) {
       return NextResponse.json({ error: message }, { status: 409 });

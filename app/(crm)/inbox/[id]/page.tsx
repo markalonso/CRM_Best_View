@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { MediaManager } from "@/components/media/media-manager";
+import { HierarchyPathSelector } from "@/components/hierarchy/hierarchy-path-selector";
+import { useAuth } from "@/hooks/use-auth";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
 type Mode = "create_new" | "update_existing";
@@ -25,13 +27,19 @@ type SessionDetail = {
   type_detected: ReviewType | "";
   type_confirmed: string;
   ai_json: Record<string, unknown>;
-  ai_meta?: { detect_confidence?: number; confidence_map?: Record<string, number>; remaining_critical_missing?: string[]; [k: string]: unknown };
+  ai_meta?: {
+    detect_confidence?: number;
+    confidence_map?: Record<string, number>;
+    remaining_critical_missing?: string[];
+    hierarchy_node_id?: string | null;
+    [k: string]: unknown;
+  };
   completeness_score: number;
 };
 
 type ExistingRow = { id: string; code?: string; source?: string; notes?: string; updated_at?: string };
 
-const steps = ["Confirm Type", "Extracted Data Review", "New vs Existing", "Merge & Save"];
+const steps = ["Type & Hierarchy", "Extracted Data Review", "New vs Existing", "Merge & Save"];
 
 const fieldConfig: Record<Exclude<ReviewType, "other">, Array<{ key: string; aiKey?: string; label: string; numeric?: boolean; notes?: boolean }>> = {
   sale: [
@@ -116,12 +124,16 @@ function normalizePhone(value: string) {
 export default function IntakeReviewPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = (user?.role || "viewer") === "admin";
 
   const [step, setStep] = useState(1);
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [selectedType, setSelectedType] = useState<ReviewType>("other");
+  const [hierarchyNodeId, setHierarchyNodeId] = useState("");
+  const [hierarchyValidation, setHierarchyValidation] = useState("");
   const [form, setForm] = useState<Record<string, string>>({});
   const [dirtyFields, setDirtyFields] = useState<Record<string, boolean>>({});
   const [aiState, setAiState] = useState<AiState>("idle");
@@ -166,6 +178,7 @@ export default function IntakeReviewPage() {
 
     const preselected = (nextSession.type_confirmed || nextSession.type_detected || "other") as ReviewType;
     setSelectedType(preselected);
+    setHierarchyNodeId((current) => String(nextSession.ai_meta?.hierarchy_node_id || current || ""));
 
     const aiJson = (nextSession.ai_json || {}) as Record<string, unknown>;
     if (Object.keys(aiJson).length > 0) {
@@ -211,6 +224,13 @@ export default function IntakeReviewPage() {
     setMergeDecisions(defaults);
   }, [fields]);
 
+  useEffect(() => {
+    setHierarchyValidation("");
+    if (selectedType === "other") {
+      setHierarchyNodeId("");
+    }
+  }, [selectedType]);
+
   async function runAi() {
     if (!session && !params.id) return;
     setAiState("running");
@@ -249,6 +269,8 @@ export default function IntakeReviewPage() {
   async function rerunByForcedType(type: Exclude<ReviewType, "other">) {
     setAiState("running");
     setAiError("");
+    setHierarchyNodeId("");
+    setHierarchyValidation("");
 
     const res = await fetch("/api/ai/extract-by-type", {
       method: "POST",
@@ -308,10 +330,29 @@ export default function IntakeReviewPage() {
     setExistingRecord(row || {});
   }
 
+  const handleHierarchyChange = useCallback((nodeId: string) => {
+    setHierarchyNodeId(nodeId);
+    if (nodeId) setHierarchyValidation("");
+  }, []);
+
+  function handleNextStep() {
+    if (step === 1 && selectedType !== "other" && !hierarchyNodeId) {
+      setHierarchyValidation("Choose a hierarchy path before continuing to the extracted data review.");
+      return;
+    }
+    setStep((s) => Math.min(4, s + 1));
+  }
+
   async function saveConfirmation() {
     if (!session || selectedType === "other") return;
     if (session.status === "confirmed") {
       setSaveToast("This intake is already confirmed.");
+      return;
+    }
+    if (!hierarchyNodeId) {
+      setHierarchyValidation("Choose a hierarchy path before saving this intake.");
+      setStep(1);
+      setSaveToast("Select a hierarchy path before saving.");
       return;
     }
 
@@ -323,7 +364,8 @@ export default function IntakeReviewPage() {
       mode,
       selectedRecordId: mode === "update_existing" ? selectedRecordId : undefined,
       extractedData: form,
-      mergeDecisions
+      mergeDecisions,
+      hierarchyNodeId
     };
 
     const res = await fetch("/api/review/confirm", {
@@ -453,7 +495,7 @@ export default function IntakeReviewPage() {
         {step === 1 && (
           <div className="space-y-4">
             <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700">AI detected type: <strong>{session.type_detected || "other"}</strong></div>
-            <p className="text-sm text-slate-600">Choose where to save this data. It will go to the correct sheet/grid and never mix with others.</p>
+            <p className="text-sm text-slate-600">First confirm the record family, then choose the exact hierarchy path where this intake should live.</p>
             <div className="grid grid-cols-2 gap-2">
               {([
                 ["sale", "Property for Sale"],
@@ -466,6 +508,10 @@ export default function IntakeReviewPage() {
                   key={value}
                   onClick={() => {
                     setSelectedType(value);
+                    if (value === "other") {
+                      setHierarchyNodeId("");
+                      setHierarchyValidation("");
+                    }
                     if (value !== "other" && value !== session.type_detected) rerunByForcedType(value);
                   }}
                   className={`rounded-lg border px-3 py-2 text-left text-sm ${selectedType === value ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-700"}`}
@@ -474,6 +520,20 @@ export default function IntakeReviewPage() {
                 </button>
               ))}
             </div>
+
+            <HierarchyPathSelector
+              reviewType={selectedType}
+              selectedNodeId={hierarchyNodeId}
+              canCreate={isAdmin}
+              disabled={session.status === "confirmed"}
+              onChange={handleHierarchyChange}
+            />
+
+            {selectedType !== "other" && hierarchyValidation && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                {hierarchyValidation}
+              </div>
+            )}
           </div>
         )}
 
@@ -534,6 +594,11 @@ export default function IntakeReviewPage() {
 
         {step === 4 && (
           <div className="space-y-3">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+              <p className="font-semibold text-slate-900">Hierarchy destination</p>
+              <p className="mt-1">{hierarchyNodeId ? "A hierarchy node has been selected and will be linked to the saved record and this intake's media." : "No hierarchy node selected yet. Go back to Step 1 before saving."}</p>
+            </div>
+
             {mode === "create_new" && <p className="text-sm text-slate-700">A new <strong>{selectedType}</strong> record will be created from reviewed fields.</p>}
             {mode === "update_existing" && fields.map((field) => (
               <div key={field.key} className="rounded-lg border border-slate-200 p-3">
@@ -557,7 +622,7 @@ export default function IntakeReviewPage() {
               </div>
             ))}
 
-            <button disabled={saving || session.status === "confirmed" || (mode === "update_existing" && !selectedRecordId) || selectedType === "other"} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+            <button disabled={saving || session.status === "confirmed" || (mode === "update_existing" && !selectedRecordId) || selectedType === "other" || !hierarchyNodeId} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
               {saving ? "Saving..." : "Save Confirmation"}
             </button>
           </div>
@@ -565,7 +630,7 @@ export default function IntakeReviewPage() {
 
         <div className="mt-6 flex justify-between">
           <button onClick={() => setStep((s) => Math.max(1, s - 1))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">Back</button>
-          <button onClick={() => setStep((s) => Math.min(4, s + 1))} className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Next</button>
+          <button onClick={handleNextStep} className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Next</button>
         </div>
       </section>
 
@@ -591,6 +656,7 @@ export default function IntakeReviewPage() {
         <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-xs text-slate-700">{session.raw_text}</pre>
 
         <h4 className="mt-4 text-sm font-semibold text-slate-700">Media Manager</h4>
+        <p className="mt-1 text-xs text-slate-500">Uploaded files stay attached to this intake now and will inherit the selected hierarchy path after confirmation.</p>
         <div className="mt-2">
           <MediaManager intakeSessionId={session.id} compact={false} />
         </div>

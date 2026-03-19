@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
+import { fetchFieldDefinitionsApi } from "@/services/api/hierarchy-api.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
 
@@ -186,6 +187,13 @@ function extractFiltersFromParams(params: URLSearchParams): GridFilters {
 
   return filters;
 }
+function gridTypeToHierarchyFamily(type: GridType): "sale" | "rent" | "buyers" | "clients" {
+  if (type === "sale") return "sale";
+  if (type === "rent") return "rent";
+  if (type === "buyer") return "buyers";
+  return "clients";
+}
+
 function csvEscape(value: unknown) {
   const text = String(value ?? "");
   if (text.includes(",") || text.includes("\n") || text.includes('"')) {
@@ -236,15 +244,24 @@ export function CRMGrid({ type }: { type: GridType }) {
   const [pinnedColumns, setPinnedColumns] = useState<string[]>(columnsByType[type].slice(0, 2).map((c) => c.key));
 
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [fieldLabels, setFieldLabels] = useState<Record<string, string>>({});
+  const [fieldVisibility, setFieldVisibility] = useState<Record<string, boolean>>({});
   const [selectedViewId, setSelectedViewId] = useState("");
   const [saveViewName, setSaveViewName] = useState("");
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const hierarchyNodeId = searchParams.get("nodeId") || "";
+
+  const availableColumns = useMemo(() => {
+    return columnsByType[type]
+      .filter((column) => fieldVisibility[column.key] ?? true)
+      .map((column) => ({ ...column, label: fieldLabels[column.key] || column.label }));
+  }, [type, fieldLabels, fieldVisibility]);
 
   const columns = useMemo(() => {
-    const map = new Map(columnsByType[type].map((c) => [c.key, c]));
+    const map = new Map(availableColumns.map((c) => [c.key, c]));
     return columnOrder.map((k) => map.get(k)).filter(Boolean) as GridColumn[];
-  }, [type, columnOrder]);
+  }, [availableColumns, columnOrder]);
 
   const selectedCount = Object.values(selectedRows).filter(Boolean).length;
 
@@ -257,6 +274,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
       filters: JSON.stringify(filters)
     });
+    if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
 
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
     if (res.status === 401 || res.status === 403) {
@@ -286,9 +304,10 @@ export function CRMGrid({ type }: { type: GridType }) {
 
   useEffect(() => {
     setPage(1);
+    setSelectedRows({});
     loadRows(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, sorts, filters]);
+  }, [type, sorts, filters, hierarchyNodeId]);
 
   useEffect(() => {
     if (!infinite) return;
@@ -311,6 +330,32 @@ export function CRMGrid({ type }: { type: GridType }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
+
+  useEffect(() => {
+    let active = true;
+    async function loadFieldLabels() {
+      try {
+        const result = await fetchFieldDefinitionsApi(gridTypeToHierarchyFamily(type), hierarchyNodeId || undefined);
+        if (!active) return;
+        const nextLabels: Record<string, string> = {};
+        const nextVisibility: Record<string, boolean> = {};
+        (result.fields || []).forEach((field) => {
+          nextLabels[field.field_key] = field.effective_label || field.default_label;
+          nextVisibility[field.field_key] = field.effective_grid_visible;
+        });
+        setFieldLabels(nextLabels);
+        setFieldVisibility(nextVisibility);
+      } catch {
+        if (!active) return;
+        setFieldLabels({});
+        setFieldVisibility({});
+      }
+    }
+    loadFieldLabels();
+    return () => {
+      active = false;
+    };
+  }, [type, hierarchyNodeId]);
 
   useEffect(() => {
     const nextFilters = extractFiltersFromParams(searchParams);
@@ -546,6 +591,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
       filters: JSON.stringify(filters)
     });
+    if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
     if (res.status === 401 || res.status === 403) {
       handleUnauthorized();
@@ -594,6 +640,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
       filters: JSON.stringify(currentOnly ? filters : {})
     });
+    if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
 
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
     if (res.status === 401 || res.status === 403) {
@@ -688,7 +735,7 @@ ${exportData.spreadsheetUrl || ""}`);
       {showChooser && (
         <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs">
           <div className="flex flex-wrap gap-3">
-            {columnsByType[type].map((c) => (
+            {availableColumns.map((c) => (
               <label key={c.key} className="inline-flex items-center gap-1">
                 <input type="checkbox" checked={!hidden[c.key]} onChange={() => setHidden((prev) => ({ ...prev, [c.key]: !prev[c.key] }))} />
                 {c.label}
@@ -781,7 +828,7 @@ ${exportData.spreadsheetUrl || ""}`);
 
             {!loading && rows.length === 0 && (
               <tr>
-                <td colSpan={columns.length + 4} className="px-3 py-10 text-center text-sm text-slate-500">No records found.</td>
+                <td colSpan={columns.length + 4} className="px-3 py-10 text-center text-sm text-slate-500">{hierarchyNodeId ? "No records found in this hierarchy layer." : "No records found."}</td>
               </tr>
             )}
 

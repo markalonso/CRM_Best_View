@@ -1,8 +1,10 @@
+import { Suspense } from "react";
+import { MediaBrowser } from "@/components/media/media-browser";
+
 export default function MediaPage() {
   return (
-    <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="text-xl font-semibold">Media</h2>
-      <p className="mt-2 text-sm text-slate-600">Media navigation endpoint ready for future gallery and file workflows.</p>
-    </section>
+    <Suspense fallback={<div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">Loading media browser…</div>}>
+      <MediaBrowser />
+    </Suspense>
   );
 }
