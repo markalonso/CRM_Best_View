@@ -57,6 +57,9 @@ export async function POST(request: NextRequest) {
     if (message.includes("already confirmed")) {
       return NextResponse.json({ error: message }, { status: 409 });
     }
+    if (message.toLowerCase().includes("hierarchy") || message.toLowerCase().includes("root node") || message.toLowerCase().includes("destination") || message.toLowerCase().includes("container-only") || message.toLowerCase().includes("archived")) {
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

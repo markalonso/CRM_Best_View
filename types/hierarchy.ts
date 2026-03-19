@@ -30,7 +30,11 @@ export interface HierarchyNode {
   depth: number;
   sort_order: number;
   allow_record_assignment: boolean;
+  can_have_children: boolean;
+  can_contain_records: boolean;
+  is_root: boolean;
   is_active: boolean;
+  archived_at: string | null;
   metadata: Record<string, unknown>;
   created_by: string | null;
   created_at: string;
@@ -39,6 +43,18 @@ export interface HierarchyNode {
 
 export interface HierarchyTreeNode extends HierarchyNode {
   children: HierarchyTreeNode[];
+}
+
+export interface HierarchyNodeUsageCounts {
+  child_nodes: number;
+  linked_records: number;
+  linked_media: number;
+}
+
+export interface HierarchyNodeDetails {
+  node: HierarchyNode;
+  parent: HierarchyNode | null;
+  usage: HierarchyNodeUsageCounts;
 }
 
 export interface FieldDefinition {

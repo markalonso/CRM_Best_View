@@ -9,6 +9,7 @@ export default function ClientsClient() {
       <FamilyHierarchyBrowser
         family="clients"
         title="Clients"
+        activeOnly
         description="Browse client records by hierarchy layers while keeping the existing grid, search, filters, and export tools available."
       />
       <CRMGrid type="client" />

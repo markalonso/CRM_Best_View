@@ -4,6 +4,7 @@ import { resolveContactId } from "@/services/contacts/contact-linking.service";
 import {
   assignMediaToHierarchyNode,
   assignRecordToHierarchyNode,
+  assertValidRecordHierarchyDestination,
   reviewTypeToHierarchyFamily,
   saveCustomFieldValuesForRecord
 } from "@/services/hierarchy/hierarchy.service";
@@ -339,6 +340,14 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   const contactId = await resolveContactId({ name: contactNameCandidate, phone: contactPhoneCandidate });
   const missingCritical = computeMissingCritical(input.type, sanitized);
   const rowStatus: "active" | "needs_review" = missingCritical.length > 0 ? "needs_review" : "active";
+  const hierarchyFamily = reviewTypeToHierarchyFamily(input.type);
+
+  if (input.hierarchy_node_id) {
+    await assertValidRecordHierarchyDestination({
+      family: hierarchyFamily,
+      nodeId: input.hierarchy_node_id
+    });
+  }
 
   let recordId = target_record_id || "";
   let changedFields: string[] = [];
@@ -421,7 +430,6 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await createTimelineEvent(recordType, recordId, "Media move warning", { warnings: mediaSummary.moveWarnings });
   }
 
-  const hierarchyFamily = reviewTypeToHierarchyFamily(input.type);
   if (input.hierarchy_node_id) {
     await assignRecordToHierarchyNode({
       family: hierarchyFamily,

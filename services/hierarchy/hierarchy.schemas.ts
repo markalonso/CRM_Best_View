@@ -14,6 +14,10 @@ export const hierarchyTreeQuerySchema = z.object({
   family: hierarchyFamilySchema
 });
 
+export const hierarchyNodeIdSchema = z.string().uuid();
+
+export const hierarchyNodeMutationModeSchema = z.enum(["folder", "record", "hybrid"]);
+
 export const createHierarchyNodeSchema = z.object({
   family: hierarchyFamilySchema,
   parentId: z.string().uuid().nullable().optional(),
@@ -22,8 +26,23 @@ export const createHierarchyNodeSchema = z.object({
   name: z.string().trim().min(1).max(120),
   sortOrder: z.number().int().min(0).max(100000).optional().default(0),
   allowRecordAssignment: z.boolean().optional().default(true),
+  mutationMode: hierarchyNodeMutationModeSchema.optional(),
+  canHaveChildren: z.boolean().optional(),
+  canContainRecords: z.boolean().optional(),
   isActive: z.boolean().optional().default(true),
   metadata: jsonRecordSchema.optional().default({})
+}).superRefine((value, ctx) => {
+  if (!value.parentId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["parentId"],
+      message: "parentId is required for child node creation. Use the root seed endpoint for missing family roots."
+    });
+  }
+});
+
+export const ensureHierarchyRootSchema = z.object({
+  family: hierarchyFamilySchema
 });
 
 export const updateHierarchyNodeSchema = z.object({
@@ -32,12 +51,38 @@ export const updateHierarchyNodeSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   sortOrder: z.number().int().min(0).max(100000).optional(),
   allowRecordAssignment: z.boolean().optional(),
+  mutationMode: hierarchyNodeMutationModeSchema.optional(),
+  canHaveChildren: z.boolean().optional(),
+  canContainRecords: z.boolean().optional(),
   isActive: z.boolean().optional(),
   metadata: jsonRecordSchema.optional()
 }).refine((value) => Object.keys(value).length > 0, { message: "At least one field must be provided" });
 
+export const archiveHierarchyNodeSchema = z.object({
+  archived: z.boolean().default(true)
+});
+
 export const moveHierarchyNodeSchema = z.object({
   newParentId: z.string().uuid().nullable()
+});
+
+export const hierarchyNodeDetailsQuerySchema = z.object({
+  id: hierarchyNodeIdSchema
+});
+
+export const hierarchyAllowedDestinationsQuerySchema = z.object({
+  family: recordFamilySchema
+});
+
+export const createHierarchyDestinationSchema = z.object({
+  family: recordFamilySchema,
+  parentId: z.string().uuid(),
+  nodeKind: hierarchyNodeKindSchema.refine((value) => value !== "root", { message: "Destination nodes cannot use the root kind" }).default("folder"),
+  nodeKey: nodeKeySchema,
+  name: z.string().trim().min(1).max(120),
+  sortOrder: z.number().int().min(0).max(100000).optional().default(0),
+  creationMode: z.enum(["record", "hybrid"]).optional().default("record"),
+  metadata: jsonRecordSchema.optional().default({})
 });
 
 export const nodeRecordsQuerySchema = z.object({

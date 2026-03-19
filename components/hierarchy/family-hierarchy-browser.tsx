@@ -9,10 +9,22 @@ type Props = {
   family: Exclude<HierarchyFamily, "media">;
   title: string;
   description: string;
+  activeOnly?: boolean;
+  recordContainerOnly?: boolean;
 };
 
 function flattenTree(nodes: HierarchyTreeNode[]): HierarchyTreeNode[] {
   return nodes.flatMap((node) => [node, ...flattenTree(node.children)]);
+}
+
+function filterTree(nodes: HierarchyTreeNode[], activeOnly: boolean): HierarchyTreeNode[] {
+  return nodes
+    .filter((node) => !activeOnly || node.is_active || node.is_root)
+    .map((node) => ({ ...node, children: filterTree(node.children || [], activeOnly) }));
+}
+
+function isRecordReadyNode(node: HierarchyTreeNode | null) {
+  return Boolean(node && node.is_active && !node.is_root && node.can_contain_records && node.allow_record_assignment);
 }
 
 function buildAncestors(node: HierarchyTreeNode | null, byId: Map<string, HierarchyTreeNode>) {
@@ -25,7 +37,7 @@ function buildAncestors(node: HierarchyTreeNode | null, byId: Map<string, Hierar
   return chain;
 }
 
-export function FamilyHierarchyBrowser({ family, title, description }: Props) {
+export function FamilyHierarchyBrowser({ family, title, description, activeOnly = false, recordContainerOnly = false }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -58,22 +70,24 @@ export function FamilyHierarchyBrowser({ family, title, description }: Props) {
     };
   }, [family]);
 
-  const flatNodes = useMemo(() => flattenTree(tree), [tree]);
+  const visibleTree = useMemo(() => filterTree(tree, activeOnly), [activeOnly, tree]);
+  const flatNodes = useMemo(() => flattenTree(visibleTree), [visibleTree]);
   const nodeById = useMemo(() => new Map<string, HierarchyTreeNode>(flatNodes.map((node) => [node.id, node])), [flatNodes]);
-  const rootNode = tree[0] || null;
+  const rootNode = visibleTree[0] || null;
   const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) || null : null;
-  const breadcrumbNodes = useMemo(() => buildAncestors(selectedNode, nodeById), [nodeById, selectedNode]);
-  const visibleChildren = selectedNode ? selectedNode.children || [] : rootNode?.children || [];
+  const selectedNodeValid = !recordContainerOnly || isRecordReadyNode(selectedNode);
+  const breadcrumbNodes = useMemo(() => buildAncestors(selectedNodeValid ? selectedNode : null, nodeById), [nodeById, selectedNode, selectedNodeValid]);
+  const visibleChildren = selectedNodeValid && selectedNode ? selectedNode.children || [] : rootNode?.children || [];
 
 
   useEffect(() => {
     if (!selectedNodeId || loading) return;
-    if (nodeById.size > 0 && !nodeById.has(selectedNodeId)) {
+    if (nodeById.size > 0 && (!nodeById.has(selectedNodeId) || (recordContainerOnly && !isRecordReadyNode(selectedNode)))) {
       const next = new URLSearchParams(searchParams.toString());
       next.delete("nodeId");
       router.replace(next.toString() ? `${pathname}?${next.toString()}` : pathname, { scroll: false });
     }
-  }, [loading, nodeById, pathname, router, searchParams, selectedNodeId]);
+  }, [loading, nodeById, pathname, recordContainerOnly, router, searchParams, selectedNode, selectedNodeId]);
 
   function updateNode(nodeId?: string) {
     const next = new URLSearchParams(searchParams.toString());
@@ -117,7 +131,7 @@ export function FamilyHierarchyBrowser({ family, title, description }: Props) {
           ))}
         </div>
         <p className="mt-3 text-sm text-slate-600">
-          {selectedNode
+          {selectedNodeValid && selectedNode
             ? `Browsing ${selectedNode.path_text}. Records table remains fully searchable/filterable inside this scope.`
             : `Browsing all ${title.toLowerCase()} records. Use the folders below to drill into a specific hierarchy layer.`}
         </p>
@@ -142,12 +156,15 @@ export function FamilyHierarchyBrowser({ family, title, description }: Props) {
           </div>
         ) : visibleChildren.length > 0 ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            {visibleChildren.map((child) => (
+            {visibleChildren.map((child) => {
+              const childSelectable = !recordContainerOnly || isRecordReadyNode(child);
+              return (
               <button
                 key={child.id}
                 type="button"
-                onClick={() => updateNode(child.id)}
-                className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50"
+                onClick={() => childSelectable && updateNode(child.id)}
+                disabled={!childSelectable}
+                className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-400"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -155,10 +172,12 @@ export function FamilyHierarchyBrowser({ family, title, description }: Props) {
                     <p className="mt-1 text-xs text-slate-500">{child.node_kind}</p>
                   </div>
                   {!child.allow_record_assignment && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">container</span>}
+                  {recordContainerOnly && !isRecordReadyNode(child) && <span className="rounded bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-700">grid disabled</span>}
+                  {!child.is_active && <span className="rounded bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700">archived</span>}
                 </div>
                 <p className="mt-3 text-sm text-slate-600 line-clamp-2">{child.path_text}</p>
               </button>
-            ))}
+            );})}
           </div>
         ) : (
           <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">

@@ -9,6 +9,8 @@ export default function RentClient() {
       <FamilyHierarchyBrowser
         family="rent"
         title="Rent"
+        activeOnly
+        recordContainerOnly
         description="Browse rent records by hierarchy layers while keeping the existing grid, search, filters, and export tools available."
       />
       <CRMGrid type="rent" />

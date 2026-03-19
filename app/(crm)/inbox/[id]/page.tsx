@@ -335,6 +335,11 @@ export default function IntakeReviewPage() {
     if (nodeId) setHierarchyValidation("");
   }, []);
 
+  function isHierarchyErrorMessage(message: string) {
+    const normalized = message.toLowerCase();
+    return normalized.includes("hierarchy") || normalized.includes("destination") || normalized.includes("root node") || normalized.includes("container-only") || normalized.includes("archived");
+  }
+
   function handleNextStep() {
     if (step === 1 && selectedType !== "other" && !hierarchyNodeId) {
       setHierarchyValidation("Choose a hierarchy path before continuing to the extracted data review.");
@@ -377,7 +382,12 @@ export default function IntakeReviewPage() {
 
     setSaving(false);
     if (!res.ok) {
-      setSaveToast(data.error || "Save failed");
+      const message = data.error || "Save failed";
+      if (typeof message === "string" && isHierarchyErrorMessage(message)) {
+        setHierarchyValidation(message);
+        setStep(1);
+      }
+      setSaveToast(message);
       return;
     }
 
@@ -495,7 +505,7 @@ export default function IntakeReviewPage() {
         {step === 1 && (
           <div className="space-y-4">
             <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700">AI detected type: <strong>{session.type_detected || "other"}</strong></div>
-            <p className="text-sm text-slate-600">First confirm the record family, then choose the exact hierarchy path where this intake should live.</p>
+            <p className="text-sm text-slate-600">First confirm the record family, then choose an active hierarchy destination where this intake should live. Root family nodes and container-only branches cannot be saved directly.</p>
             <div className="grid grid-cols-2 gap-2">
               {([
                 ["sale", "Property for Sale"],
