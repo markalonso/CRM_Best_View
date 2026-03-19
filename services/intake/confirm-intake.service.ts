@@ -1,6 +1,12 @@
 import "server-only";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { resolveContactId } from "@/services/contacts/contact-linking.service";
+import {
+  assignMediaToHierarchyNode,
+  assignRecordToHierarchyNode,
+  reviewTypeToHierarchyFamily,
+  saveCustomFieldValuesForRecord
+} from "@/services/hierarchy/hierarchy.service";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client";
 type Mode = "create_new" | "update_existing";
@@ -13,6 +19,8 @@ type ConfirmInput = {
   target_record_id?: string;
   extracted_data: Record<string, unknown>;
   merge_decisions: Record<string, MergeMode>;
+  hierarchy_node_id?: string;
+  custom_field_values?: Array<{ fieldKey: string; value: unknown }>;
 };
 
 type ConfirmResult = {
@@ -413,10 +421,51 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await createTimelineEvent(recordType, recordId, "Media move warning", { warnings: mediaSummary.moveWarnings });
   }
 
+  const hierarchyFamily = reviewTypeToHierarchyFamily(input.type);
+  if (input.hierarchy_node_id) {
+    await assignRecordToHierarchyNode({
+      family: hierarchyFamily,
+      recordId,
+      nodeId: input.hierarchy_node_id
+    });
+
+    const { data: mediaRows } = await supabase
+      .from("media")
+      .select("id")
+      .eq("record_type", recordType)
+      .eq("record_id", recordId);
+
+    for (const mediaRow of mediaRows || []) {
+      await assignMediaToHierarchyNode({
+        mediaId: String(mediaRow.id),
+        nodeId: input.hierarchy_node_id
+      });
+    }
+
+    await createTimelineEvent(recordType, recordId, "Assigned hierarchy node", {
+      hierarchy_node_id: input.hierarchy_node_id
+    });
+  }
+
+  if ((input.custom_field_values || []).length > 0) {
+    const savedCustomValues = await saveCustomFieldValuesForRecord({
+      family: hierarchyFamily,
+      recordId,
+      values: input.custom_field_values || []
+    });
+
+    if (savedCustomValues.length > 0) {
+      await createTimelineEvent(recordType, recordId, "Saved custom field values", {
+        custom_field_count: savedCustomValues.length
+      });
+    }
+  }
+
   const mergedMeta = {
     ...((intake.ai_meta || {}) as Record<string, unknown>),
     missing_critical_fields: missingCritical,
-    final_row_status: rowStatus
+    final_row_status: rowStatus,
+    hierarchy_node_id: input.hierarchy_node_id || null
   };
 
   const { error: intakeUpdateError } = await supabase

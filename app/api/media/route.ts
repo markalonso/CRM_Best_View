@@ -1,8 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
+import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { assignMediaToHierarchyNode } from "@/services/hierarchy/hierarchy.service";
 import { buildMediaPath, detectMediaType, mediaStorageProvider } from "@/services/media/media-manager.service";
 
+const recordLinkColumnByRecordType = {
+  properties_sale: "sale_id",
+  properties_rent: "rent_id",
+  buyers: "buyer_id",
+  clients: "client_id"
+} as const;
+
+async function resolveRecordHierarchyNodeId(recordType: string, recordId: string) {
+  const linkColumn = recordLinkColumnByRecordType[recordType as keyof typeof recordLinkColumnByRecordType];
+  if (!linkColumn || !recordId) return "";
+
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase
+    .from("record_hierarchy_links")
+    .select("node_id")
+    .eq(linkColumn, recordId)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  return String(data?.node_id || "");
+}
+
 export async function GET(request: NextRequest) {
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const supabase = createSupabaseClient();
   const { searchParams } = new URL(request.url);
   const intakeSessionId = searchParams.get("intake_session_id");
@@ -25,6 +52,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
   const supabase = createSupabaseClient();
   const form = await request.formData();
 
@@ -49,7 +80,10 @@ export async function POST(request: NextRequest) {
     const sig = new Set((existing || []).map((m) => `${m.original_filename}|${m.file_size ?? 0}`));
     for (const f of files) {
       const key = `${f.name}|${f.size}`;
-      if (sig.has(key)) { duplicates.push(f.name); duplicateSig.add(key); }
+      if (sig.has(key)) {
+        duplicates.push(f.name);
+        duplicateSig.add(key);
+      }
     }
   }
 
@@ -68,22 +102,38 @@ export async function POST(request: NextRequest) {
     const mediaType = detectMediaType(file.type || "");
 
     records.push({
-  record_type: recordType || null,
-  record_id: recordId || null,
-  intake_session_id: intakeSessionId || null,
-  storage_path: path,
-  file_url: uploaded.publicUrl,
-  mime_type: file.type || "application/octet-stream",
-  media_type: mediaType,
-  original_filename: file.name,
-  file_size: file.size
-});
+      record_type: recordType || null,
+      record_id: recordId || null,
+      intake_session_id: intakeSessionId || null,
+      storage_path: path,
+      file_url: uploaded.publicUrl,
+      mime_type: file.type || "application/octet-stream",
+      media_type: mediaType,
+      original_filename: file.name,
+      file_size: file.size
+    });
   }
 
+  let inserted: Array<{ id: string }> = [];
   if (records.length > 0) {
-    const { error } = await supabase.from("media").insert(records);
+    const { data, error } = await supabase.from("media").insert(records).select("id");
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    inserted = (data || []) as Array<{ id: string }>;
   }
 
-  return NextResponse.json({ ok: true, uploaded: records.length, skippedDuplicates: duplicates });
+  const hierarchyWarnings: string[] = [];
+  if (recordType && recordId && inserted.length > 0) {
+    try {
+      const hierarchyNodeId = await resolveRecordHierarchyNodeId(recordType, recordId);
+      if (hierarchyNodeId) {
+        for (const row of inserted) {
+          await assignMediaToHierarchyNode({ mediaId: String(row.id), nodeId: hierarchyNodeId, actorUserId: actor.userId });
+        }
+      }
+    } catch (error) {
+      hierarchyWarnings.push(error instanceof Error ? error.message : "Failed to assign media to hierarchy node");
+    }
+  }
+
+  return NextResponse.json({ ok: true, uploaded: records.length, skippedDuplicates: duplicates, hierarchyWarnings });
 }

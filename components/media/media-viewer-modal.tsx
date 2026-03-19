@@ -9,10 +9,14 @@ export function MediaViewerModal({ items, index, onClose, onPrev, onNext }: { it
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-5" onClick={onClose}>
       <div className="max-h-[90vh] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-2 flex items-center justify-between text-white">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-white">
           <button onClick={onPrev} className="rounded bg-white/20 px-3 py-1 text-sm">Prev</button>
           <span className="text-sm">{current.original_filename || current.media_type}</span>
-          <button onClick={onNext} className="rounded bg-white/20 px-3 py-1 text-sm">Next</button>
+          <div className="flex items-center gap-2">
+            <a href={current.file_url} target="_blank" rel="noreferrer" className="rounded bg-white/20 px-3 py-1 text-sm">Open</a>
+            <a href={current.file_url} download className="rounded bg-white/20 px-3 py-1 text-sm">Download</a>
+            <button onClick={onNext} className="rounded bg-white/20 px-3 py-1 text-sm">Next</button>
+          </div>
         </div>
 
         {current.media_type === "image" && (
@@ -25,7 +29,10 @@ export function MediaViewerModal({ items, index, onClose, onPrev, onNext }: { it
         {(current.media_type === "document" || current.media_type === "other") && (
           <div className="rounded bg-white p-6 text-center">
             <p className="mb-3 text-sm text-slate-700">Document preview</p>
-            <a href={current.file_url} target="_blank" rel="noreferrer" className="rounded bg-slate-900 px-4 py-2 text-sm text-white">Open document</a>
+            <div className="flex items-center justify-center gap-2">
+              <a href={current.file_url} target="_blank" rel="noreferrer" className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700">Open document</a>
+              <a href={current.file_url} download className="rounded bg-slate-900 px-4 py-2 text-sm text-white">Download document</a>
+            </div>
           </div>
         )}
       </div>

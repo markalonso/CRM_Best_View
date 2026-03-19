@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
+import { ADMIN_SIDEBAR_ITEMS, SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { useAuth } from "@/hooks/use-auth";
 
 type CRMShellProps = {
   children: ReactNode;
@@ -28,6 +29,7 @@ type FlatItem = SearchResultItem | QuickActionItem;
 export function CRMShell({ children }: CRMShellProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const { user } = useAuth();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [results, setResults] = useState<Array<{ key: string; label: string; count: number; items: SearchResultItem[] }>>([]);
@@ -39,6 +41,7 @@ export function CRMShell({ children }: CRMShellProps) {
     const rows = results.flatMap((group) => group.items);
     return [...rows, ...quickActions.map((action) => ({ ...action, isAction: true as const }))];
   }, [results, quickActions]);
+  const navItems = (user?.role || "viewer") === "admin" ? [...SIDEBAR_ITEMS, ...ADMIN_SIDEBAR_ITEMS] : SIDEBAR_ITEMS;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -88,7 +91,7 @@ export function CRMShell({ children }: CRMShellProps) {
         </div>
 
         <nav className="space-y-1">
-          {SIDEBAR_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const isActive = pathname === item.href;
             return (
               <Link

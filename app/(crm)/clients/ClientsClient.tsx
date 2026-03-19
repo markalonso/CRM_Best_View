@@ -1,14 +1,16 @@
 "use client";
 
 import { CRMGrid } from "@/components/grid/crm-grid";
+import { FamilyHierarchyBrowser } from "@/components/hierarchy/family-hierarchy-browser";
 
 export default function ClientsClient() {
   return (
     <section className="space-y-4">
-      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-xl font-semibold">Clients</h2>
-        <p className="mt-1 text-sm text-slate-600">Unified CRM Grid with inline edit, sort, selection and detail drawer.</p>
-      </section>
+      <FamilyHierarchyBrowser
+        family="clients"
+        title="Clients"
+        description="Browse client records by hierarchy layers while keeping the existing grid, search, filters, and export tools available."
+      />
       <CRMGrid type="client" />
     </section>
   );
