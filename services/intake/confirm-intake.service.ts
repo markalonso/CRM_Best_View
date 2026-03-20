@@ -5,6 +5,7 @@ import {
   assignMediaToHierarchyNode,
   assignRecordToHierarchyNode,
   assertValidRecordHierarchyDestination,
+  createOrReuseIntakeMediaChildNode,
   reviewTypeToHierarchyFamily,
   saveCustomFieldValuesForRecord
 } from "@/services/hierarchy/hierarchy.service";
@@ -21,7 +22,9 @@ type ConfirmInput = {
   extracted_data: Record<string, unknown>;
   merge_decisions: Record<string, MergeMode>;
   hierarchy_node_id?: string;
+  media_folder_name?: string;
   custom_field_values?: Array<{ fieldKey: string; value: unknown }>;
+  actor_user_id?: string | null;
 };
 
 type ConfirmResult = {
@@ -341,12 +344,37 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   const missingCritical = computeMissingCritical(input.type, sanitized);
   const rowStatus: "active" | "needs_review" = missingCritical.length > 0 ? "needs_review" : "active";
   const hierarchyFamily = reviewTypeToHierarchyFamily(input.type);
+  const { count: sessionMediaCount, error: mediaCountError } = await supabase
+    .from("media")
+    .select("id", { count: "exact", head: true })
+    .eq("intake_session_id", session_id);
+
+  if (mediaCountError) throw new Error(mediaCountError.message);
+  const hasSessionMedia = (sessionMediaCount || 0) > 0;
+  const mediaFolderName = String(input.media_folder_name || "").trim();
 
   if (input.hierarchy_node_id) {
     await assertValidRecordHierarchyDestination({
       family: hierarchyFamily,
       nodeId: input.hierarchy_node_id
     });
+  }
+  if (hasSessionMedia && !mediaFolderName) {
+    throw new Error("Media folder name is required when intake contains media.");
+  }
+
+  let mediaHierarchyNodeId: string | null = null;
+  let mediaHierarchyNodeName: string | null = null;
+  if (hasSessionMedia && input.hierarchy_node_id) {
+    const mediaChildNode = await createOrReuseIntakeMediaChildNode({
+      family: hierarchyFamily,
+      parentNodeId: input.hierarchy_node_id,
+      intakeSessionId: session_id,
+      folderName: mediaFolderName,
+      actorUserId: input.actor_user_id || null
+    });
+    mediaHierarchyNodeId = mediaChildNode.id;
+    mediaHierarchyNodeName = mediaChildNode.name;
   }
 
   let recordId = target_record_id || "";
@@ -434,7 +462,8 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await assignRecordToHierarchyNode({
       family: hierarchyFamily,
       recordId,
-      nodeId: input.hierarchy_node_id
+      nodeId: input.hierarchy_node_id,
+      actorUserId: input.actor_user_id || null
     });
 
     const { data: mediaRows } = await supabase
@@ -443,15 +472,25 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
       .eq("record_type", recordType)
       .eq("record_id", recordId);
 
+    if (mediaHierarchyNodeId) {
+      await createTimelineEvent(recordType, recordId, "Created media hierarchy folder", {
+        parent_hierarchy_node_id: input.hierarchy_node_id,
+        media_hierarchy_node_id: mediaHierarchyNodeId,
+        media_folder_name: mediaHierarchyNodeName || mediaFolderName
+      });
+    }
+
     for (const mediaRow of mediaRows || []) {
       await assignMediaToHierarchyNode({
         mediaId: String(mediaRow.id),
-        nodeId: input.hierarchy_node_id
+        nodeId: mediaHierarchyNodeId || input.hierarchy_node_id,
+        actorUserId: input.actor_user_id || null
       });
     }
 
     await createTimelineEvent(recordType, recordId, "Assigned hierarchy node", {
-      hierarchy_node_id: input.hierarchy_node_id
+      hierarchy_node_id: input.hierarchy_node_id,
+      media_hierarchy_node_id: mediaHierarchyNodeId
     });
   }
 
@@ -459,7 +498,8 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     const savedCustomValues = await saveCustomFieldValuesForRecord({
       family: hierarchyFamily,
       recordId,
-      values: input.custom_field_values || []
+      values: input.custom_field_values || [],
+      actorUserId: input.actor_user_id || null
     });
 
     if (savedCustomValues.length > 0) {
@@ -473,7 +513,9 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     ...((intake.ai_meta || {}) as Record<string, unknown>),
     missing_critical_fields: missingCritical,
     final_row_status: rowStatus,
-    hierarchy_node_id: input.hierarchy_node_id || null
+    hierarchy_node_id: input.hierarchy_node_id || null,
+    media_folder_name: hasSessionMedia ? mediaFolderName : null,
+    media_hierarchy_node_id: mediaHierarchyNodeId
   };
 
   const { error: intakeUpdateError } = await supabase

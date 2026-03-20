@@ -12,6 +12,7 @@ const payloadSchema = z.object({
   extractedData: z.record(z.string(), z.unknown()).default({}),
   mergeDecisions: z.record(z.string(), z.enum(["keep_existing", "replace_with_new", "append"])) .default({}),
   hierarchyNodeId: z.string().uuid().optional(),
+  mediaFolderName: z.string().trim().max(120).optional(),
   customFieldValues: z.array(
     z.object({
       fieldKey: z.string().trim().min(1).max(100),
@@ -35,7 +36,9 @@ export async function POST(request: NextRequest) {
       extracted_data: payload.extractedData || {},
       merge_decisions: payload.mergeDecisions || {},
       hierarchy_node_id: payload.hierarchyNodeId,
-      custom_field_values: payload.customFieldValues || []
+      media_folder_name: payload.mediaFolderName,
+      custom_field_values: payload.customFieldValues || [],
+      actor_user_id: actor.userId
     });
 
     await writeAuditLog({
@@ -57,7 +60,7 @@ export async function POST(request: NextRequest) {
     if (message.includes("already confirmed")) {
       return NextResponse.json({ error: message }, { status: 409 });
     }
-    if (message.toLowerCase().includes("hierarchy") || message.toLowerCase().includes("root node") || message.toLowerCase().includes("destination") || message.toLowerCase().includes("container-only") || message.toLowerCase().includes("archived")) {
+    if (message.toLowerCase().includes("hierarchy") || message.toLowerCase().includes("root node") || message.toLowerCase().includes("destination") || message.toLowerCase().includes("container-only") || message.toLowerCase().includes("archived") || message.toLowerCase().includes("media folder")) {
       return NextResponse.json({ error: message }, { status: 400 });
     }
     return NextResponse.json({ error: message }, { status: 500 });
