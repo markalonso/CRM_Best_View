@@ -1,11 +1,20 @@
 "use client";
 
 import Link from "next/link";
+import { fetchFieldDefinitionsApi } from "@/services/api/hierarchy-api.service";
 import { MediaManager } from "@/components/media/media-manager";
 import { HierarchyPathSelector } from "@/components/hierarchy/hierarchy-path-selector";
 import { useAuth } from "@/hooks/use-auth";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  formatFieldValueForInput,
+  isFieldValueEmpty,
+  parseFieldInputValue,
+  resolveAiValueForField,
+  reviewTypeToHierarchyFamily
+} from "@/lib/effective-fields";
+import type { EffectiveFieldDefinition } from "@/types/hierarchy";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
 type Mode = "create_new" | "update_existing";
@@ -20,6 +29,14 @@ type QuickQuestion = {
   options?: string[];
 };
 
+type LegacyReviewField = {
+  key: string;
+  aiKey?: string;
+  label: string;
+  numeric?: boolean;
+  notes?: boolean;
+};
+
 type SessionDetail = {
   id: string;
   status: "draft" | "needs_review" | "confirmed";
@@ -32,6 +49,8 @@ type SessionDetail = {
     confidence_map?: Record<string, number>;
     remaining_critical_missing?: string[];
     hierarchy_node_id?: string | null;
+    media_folder_name?: string | null;
+    media_hierarchy_node_id?: string | null;
     [k: string]: unknown;
   };
   completeness_score: number;
@@ -39,9 +58,11 @@ type SessionDetail = {
 
 type ExistingRow = { id: string; code?: string; source?: string; notes?: string; updated_at?: string };
 
+type FieldErrorMap = Record<string, string>;
+
 const steps = ["Type & Hierarchy", "Extracted Data Review", "New vs Existing", "Merge & Save"];
 
-const fieldConfig: Record<Exclude<ReviewType, "other">, Array<{ key: string; aiKey?: string; label: string; numeric?: boolean; notes?: boolean }>> = {
+const fieldConfig: Record<Exclude<ReviewType, "other">, LegacyReviewField[]> = {
   sale: [
     { key: "source", aiKey: "code", label: "Source" },
     { key: "price", label: "Price", numeric: true },
@@ -109,6 +130,28 @@ function confidenceUi(score: number) {
 
 const defaultAreas = ["New Cairo", "Maadi", "Zamalek", "Sheikh Zayed", "October", "Nasr City"];
 
+function fieldValueKey(field: EffectiveFieldDefinition) {
+  return field.storage_kind === "core_column" ? field.core_column_name || field.field_key : field.field_key;
+}
+
+function isAppendOnlyField(fieldKey: string) {
+  return fieldKey === "notes";
+}
+
+function reviewTypeToGridType(type: Exclude<ReviewType, "other">) {
+  if (type === "sale") return "sale";
+  if (type === "rent") return "rent";
+  if (type === "buyer") return "buyer";
+  return "client";
+}
+
+function normalizeOptions(field: EffectiveFieldDefinition) {
+  const rawOptions = field.effective_options_json;
+  const directOptions = Array.isArray(rawOptions["options"]) ? rawOptions["options"] : Array.isArray(rawOptions["values"]) ? rawOptions["values"] : null;
+  if (!directOptions) return [];
+  return directOptions.map((option) => String(option)).filter(Boolean);
+}
+
 function recordPath(recordType: string) {
   if (recordType === "properties_sale") return "/sale-properties";
   if (recordType === "properties_rent") return "/rent-properties";
@@ -152,8 +195,16 @@ export default function IntakeReviewPage() {
   const [saving, setSaving] = useState(false);
   const [saveToast, setSaveToast] = useState("");
   const [savedRecord, setSavedRecord] = useState<{ recordType: string; recordId: string } | null>(null);
+  const [mediaCount, setMediaCount] = useState(0);
+  const [mediaFolderName, setMediaFolderName] = useState("");
+  const [mediaFolderValidation, setMediaFolderValidation] = useState("");
+  const [effectiveFields, setEffectiveFields] = useState<EffectiveFieldDefinition[]>([]);
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
+  const [customFieldDirty, setCustomFieldDirty] = useState<Record<string, boolean>>({});
+  const [fieldValidationErrors, setFieldValidationErrors] = useState<FieldErrorMap>({});
+  const [fieldLoadError, setFieldLoadError] = useState("");
 
-  const fields = useMemo(() => {
+  const legacyFields = useMemo(() => {
     if (selectedType === "other") return [];
     return fieldConfig[selectedType];
   }, [selectedType]);
@@ -162,6 +213,37 @@ export default function IntakeReviewPage() {
     const remaining = (session?.ai_meta?.remaining_critical_missing || []) as string[];
     return remaining.length > 0 || Object.values(skippedQuestions).some(Boolean);
   }, [session?.ai_meta?.remaining_critical_missing, skippedQuestions]);
+  const hasUploadedMedia = mediaCount > 0;
+  const hierarchyFamily = useMemo(() => reviewTypeToHierarchyFamily(selectedType), [selectedType]);
+  const intakeFields = useMemo(
+    () => effectiveFields.filter((field) => field.effective_visible && field.effective_intake_visible),
+    [effectiveFields]
+  );
+  const mergeableCoreFields = useMemo(() => {
+    if (selectedType === "other") return [] as Array<Pick<EffectiveFieldDefinition, "id" | "field_key" | "effective_label"> & { valueKey: string; notes: boolean }>;
+    if (effectiveFields.length > 0) {
+      return intakeFields
+        .filter((field) => field.storage_kind === "core_column")
+        .map((field) => {
+          const valueKey = fieldValueKey(field);
+          return {
+            id: field.id,
+            field_key: field.field_key,
+            effective_label: field.effective_label,
+            valueKey,
+            notes: isAppendOnlyField(valueKey)
+          };
+        });
+    }
+
+    return legacyFields.map((field) => ({
+      id: field.key,
+      field_key: field.key,
+      effective_label: field.label,
+      valueKey: field.key,
+      notes: Boolean(field.notes)
+    }));
+  }, [effectiveFields.length, intakeFields, legacyFields, selectedType]);
 
   async function loadSession() {
     setLoading(true);
@@ -175,10 +257,12 @@ export default function IntakeReviewPage() {
     const nextSession = data.session as SessionDetail;
     setSession(nextSession);
     setQuickQuestions((data.quick_questions || []) as QuickQuestion[]);
+    setMediaCount(Array.isArray(data.media) ? data.media.length : 0);
 
     const preselected = (nextSession.type_confirmed || nextSession.type_detected || "other") as ReviewType;
     setSelectedType(preselected);
     setHierarchyNodeId((current) => String(nextSession.ai_meta?.hierarchy_node_id || current || ""));
+    setMediaFolderName((current) => String(nextSession.ai_meta?.media_folder_name || current || ""));
 
     const aiJson = (nextSession.ai_json || {}) as Record<string, unknown>;
     if (Object.keys(aiJson).length > 0) {
@@ -218,18 +302,86 @@ export default function IntakeReviewPage() {
 
   useEffect(() => {
     const defaults: Record<string, MergeMode> = {};
-    fields.forEach((f) => {
-      defaults[f.key] = f.notes ? "append" : "replace_with_new";
+    mergeableCoreFields.forEach((field) => {
+      defaults[field.valueKey] = field.notes ? "append" : "replace_with_new";
     });
     setMergeDecisions(defaults);
-  }, [fields]);
+  }, [mergeableCoreFields]);
 
   useEffect(() => {
     setHierarchyValidation("");
+    setFieldValidationErrors({});
+    setSelectedRecordId("");
+    setExistingRecord({});
     if (selectedType === "other") {
       setHierarchyNodeId("");
+      setEffectiveFields([]);
     }
   }, [selectedType]);
+
+  useEffect(() => {
+    if (!hasUploadedMedia) {
+      setMediaFolderValidation("");
+    }
+  }, [hasUploadedMedia]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadEffectiveFields() {
+      if (!hierarchyFamily) {
+        if (active) {
+          setEffectiveFields([]);
+          setFieldLoadError("");
+        }
+        return;
+      }
+
+      try {
+        const result = await fetchFieldDefinitionsApi(hierarchyFamily, hierarchyNodeId || undefined);
+        if (!active) return;
+        setEffectiveFields(result.fields || []);
+        setFieldLoadError("");
+      } catch (loadError) {
+        if (!active) return;
+        setEffectiveFields([]);
+        setFieldLoadError(loadError instanceof Error ? loadError.message : "Failed to load node field configuration.");
+      }
+    }
+
+    loadEffectiveFields();
+    return () => {
+      active = false;
+    };
+  }, [hierarchyFamily, hierarchyNodeId]);
+
+  useEffect(() => {
+    if (!session || effectiveFields.length === 0) return;
+
+    const aiJson = (session.ai_json || {}) as Record<string, unknown>;
+
+    setForm((prev) => {
+      const next = { ...prev };
+      effectiveFields.forEach((field) => {
+        if (field.storage_kind !== "core_column") return;
+        const key = fieldValueKey(field);
+        if (dirtyFields[key]) return;
+        const resolved = resolveAiValueForField(field, aiJson);
+        next[key] = formatFieldValueForInput(resolved);
+      });
+      return next;
+    });
+
+    setCustomFieldValues((prev) => {
+      const next = { ...prev };
+      effectiveFields.forEach((field) => {
+        if (field.storage_kind !== "custom_value" || customFieldDirty[field.field_key]) return;
+        const resolved = resolveAiValueForField(field, aiJson);
+        next[field.field_key] = formatFieldValueForInput(resolved);
+      });
+      return next;
+    });
+  }, [customFieldDirty, dirtyFields, effectiveFields, session]);
 
   async function runAi() {
     if (!session && !params.id) return;
@@ -324,25 +476,85 @@ export default function IntakeReviewPage() {
 
   async function loadExistingRecord(recordId: string) {
     if (!recordId || selectedType === "other") return;
-    const res = await fetch(`/api/review/search?type=${selectedType}&q=`);
-    const data = await res.json();
-    const row = (data.results || []).find((r: ExistingRow) => r.id === recordId);
-    setExistingRecord(row || {});
+    const type = reviewTypeToGridType(selectedType);
+    const query = new URLSearchParams({ type, id: recordId });
+    if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
+    const res = await fetch(`/api/grid/record-detail?${query.toString()}`, { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setExistingRecord({});
+      return;
+    }
+    setExistingRecord((data.field_values || data.record || {}) as Record<string, unknown>);
   }
 
   const handleHierarchyChange = useCallback((nodeId: string) => {
     setHierarchyNodeId(nodeId);
+    setExistingRecord({});
+    setFieldValidationErrors({});
     if (nodeId) setHierarchyValidation("");
   }, []);
+
+  function handleFieldValueChange(field: EffectiveFieldDefinition, value: string) {
+    const key = fieldValueKey(field);
+    if (field.storage_kind === "core_column") {
+      setDirtyFields((prev) => ({ ...prev, [key]: true }));
+      setForm((prev) => ({ ...prev, [key]: value }));
+    } else {
+      setCustomFieldDirty((prev) => ({ ...prev, [field.field_key]: true }));
+      setCustomFieldValues((prev) => ({ ...prev, [field.field_key]: value }));
+    }
+
+    setFieldValidationErrors((prev) => {
+      if (!prev[key] && !prev[field.field_key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      delete next[field.field_key];
+      return next;
+    });
+  }
 
   function isHierarchyErrorMessage(message: string) {
     const normalized = message.toLowerCase();
     return normalized.includes("hierarchy") || normalized.includes("destination") || normalized.includes("root node") || normalized.includes("container-only") || normalized.includes("archived");
   }
 
+  function validateMediaFolderName() {
+    if (!hasUploadedMedia) return true;
+    if (mediaFolderName.trim()) {
+      setMediaFolderValidation("");
+      return true;
+    }
+    setMediaFolderValidation("Enter a media folder name before continuing because this intake includes uploaded media.");
+    return false;
+  }
+
+  function validateDynamicFields() {
+    const nextErrors: FieldErrorMap = {};
+
+    intakeFields.forEach((field) => {
+      if (!field.effective_required) return;
+      const key = fieldValueKey(field);
+      const rawValue = field.storage_kind === "core_column" ? form[key] : customFieldValues[field.field_key];
+      const parsedValue = field.storage_kind === "custom_value" ? parseFieldInputValue(field, rawValue) : rawValue;
+      if (isFieldValueEmpty(parsedValue)) {
+        nextErrors[key] = `${field.effective_label} is required for this hierarchy path.`;
+      }
+    });
+
+    setFieldValidationErrors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
+  }
+
   function handleNextStep() {
     if (step === 1 && selectedType !== "other" && !hierarchyNodeId) {
       setHierarchyValidation("Choose a hierarchy path before continuing to the extracted data review.");
+      return;
+    }
+    if (step === 1 && selectedType !== "other" && !validateMediaFolderName()) {
+      return;
+    }
+    if (step === 2 && selectedType !== "other" && !validateDynamicFields()) {
       return;
     }
     setStep((s) => Math.min(4, s + 1));
@@ -360,8 +572,26 @@ export default function IntakeReviewPage() {
       setSaveToast("Select a hierarchy path before saving.");
       return;
     }
+    if (!validateMediaFolderName()) {
+      setStep(1);
+      setSaveToast("Add a media folder name before saving this intake.");
+      return;
+    }
+    if (!validateDynamicFields()) {
+      setStep(2);
+      setSaveToast("Complete the required hierarchy fields before saving this intake.");
+      return;
+    }
 
     setSaving(true);
+
+    const dynamicCustomFieldValues = intakeFields
+      .filter((field) => field.storage_kind === "custom_value")
+      .map((field) => ({
+        fieldKey: field.field_key,
+        value: parseFieldInputValue(field, customFieldValues[field.field_key] ?? "")
+      }))
+      .filter((entry) => !isFieldValueEmpty(entry.value));
 
     const payload = {
       intakeSessionId: session.id,
@@ -370,7 +600,9 @@ export default function IntakeReviewPage() {
       selectedRecordId: mode === "update_existing" ? selectedRecordId : undefined,
       extractedData: form,
       mergeDecisions,
-      hierarchyNodeId
+      hierarchyNodeId,
+      mediaFolderName: hasUploadedMedia ? mediaFolderName.trim() : undefined,
+      customFieldValues: dynamicCustomFieldValues
     };
 
     const res = await fetch("/api/review/confirm", {
@@ -385,6 +617,10 @@ export default function IntakeReviewPage() {
       const message = data.error || "Save failed";
       if (typeof message === "string" && isHierarchyErrorMessage(message)) {
         setHierarchyValidation(message);
+        setStep(1);
+      }
+      if (typeof message === "string" && message.toLowerCase().includes("media folder")) {
+        setMediaFolderValidation(message);
         setStep(1);
       }
       setSaveToast(message);
@@ -539,6 +775,30 @@ export default function IntakeReviewPage() {
               onChange={handleHierarchyChange}
             />
 
+            {selectedType !== "other" && hasUploadedMedia && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <label className="text-sm font-semibold text-slate-800" htmlFor="media-folder-name">Media folder name</label>
+                <p className="mt-1 text-xs text-slate-500">
+                  This intake includes {mediaCount} uploaded file{mediaCount === 1 ? "" : "s"}. The record will stay on the selected hierarchy node, but the media will be organized into a new child folder under that node.
+                </p>
+                <input
+                  id="media-folder-name"
+                  value={mediaFolderName}
+                  onChange={(e) => {
+                    setMediaFolderName(e.target.value);
+                    if (e.target.value.trim()) setMediaFolderValidation("");
+                  }}
+                  placeholder="e.g. Ahmed Unit Photos"
+                  className="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+                {mediaFolderValidation && (
+                  <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {mediaFolderValidation}
+                  </div>
+                )}
+              </div>
+            )}
+
             {selectedType !== "other" && hierarchyValidation && (
               <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
                 {hierarchyValidation}
@@ -550,23 +810,65 @@ export default function IntakeReviewPage() {
         {step === 2 && (
           <div className="space-y-3">
             {selectedType === "other" && <p className="text-sm text-slate-600">Select a type in Step 1 first.</p>}
-            {fields.map((field) => {
-              const value = form[field.key] || "";
-              const rawConfidence = Number((session.ai_meta?.confidence_map || {})[field.aiKey || field.key] ?? 0.6) * 100;
+            {fieldLoadError && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{fieldLoadError}</div>}
+            {selectedType !== "other" && intakeFields.length === 0 && !fieldLoadError && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                No intake-visible fields are configured for the current hierarchy path yet.
+              </div>
+            )}
+            {intakeFields.map((field) => {
+              const valueKey = fieldValueKey(field);
+              const value = field.storage_kind === "core_column" ? form[valueKey] || "" : customFieldValues[field.field_key] || "";
+              const rawConfidence = Number((session.ai_meta?.confidence_map || {})[field.core_column_name || field.field_key] ?? 0.6) * 100;
               const ui = confidenceUi(rawConfidence);
+              const options = normalizeOptions(field);
+              const error = fieldValidationErrors[valueKey];
+              const inputClassName = `rounded-lg border px-3 py-2 text-sm ${error ? "border-rose-300 bg-rose-50" : "border-slate-300"}`;
 
               return (
-                <div key={field.key} className="grid grid-cols-[200px_1fr_120px] items-center gap-3">
-                  <label className="text-sm font-medium text-slate-700">{field.label}</label>
-                  <input
-                    value={value}
-                    onChange={(e) => {
-                      setDirtyFields((prev) => ({ ...prev, [field.key]: true }));
-                      setForm((prev) => ({ ...prev, [field.key]: e.target.value }));
-                    }}
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                  <span className={`inline-flex justify-center rounded-full px-2 py-1 text-xs font-semibold ${ui.cls}`}>{ui.label}</span>
+                <div key={field.id} className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_120px] lg:items-start">
+                  <div className="pt-2">
+                    <label className="text-sm font-medium text-slate-700">{field.effective_label}</label>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {field.storage_kind === "custom_value" ? "Custom field" : "Core field"}
+                      {field.effective_required ? " • Required" : ""}
+                    </p>
+                  </div>
+
+                  <div>
+                    {field.data_type === "long_text" ? (
+                      <textarea
+                        value={value}
+                        onChange={(e) => handleFieldValueChange(field, e.target.value)}
+                        className={`${inputClassName} min-h-24 w-full`}
+                      />
+                    ) : field.data_type === "boolean" ? (
+                      <select value={value} onChange={(e) => handleFieldValueChange(field, e.target.value)} className={`${inputClassName} w-full`}>
+                        <option value="">Select</option>
+                        <option value="true">Yes</option>
+                        <option value="false">No</option>
+                      </select>
+                    ) : (field.data_type === "single_select" || field.data_type === "multi_select") && options.length > 0 ? (
+                      <select value={value} onChange={(e) => handleFieldValueChange(field, e.target.value)} className={`${inputClassName} w-full`}>
+                        <option value="">{field.data_type === "multi_select" ? "Select / type later" : "Select"}</option>
+                        {options.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        value={value}
+                        onChange={(e) => handleFieldValueChange(field, e.target.value)}
+                        className={`${inputClassName} w-full`}
+                        placeholder={field.storage_kind === "custom_value" ? "Enter value" : undefined}
+                      />
+                    )}
+                    {error && <p className="mt-1 text-xs text-rose-700">{error}</p>}
+                  </div>
+
+                  <div className="pt-2">
+                    <span className={`inline-flex justify-center rounded-full px-2 py-1 text-xs font-semibold ${ui.cls}`}>{ui.label}</span>
+                  </div>
                 </div>
               );
             })}
@@ -606,16 +908,26 @@ export default function IntakeReviewPage() {
           <div className="space-y-3">
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
               <p className="font-semibold text-slate-900">Hierarchy destination</p>
-              <p className="mt-1">{hierarchyNodeId ? "A hierarchy node has been selected and will be linked to the saved record and this intake's media." : "No hierarchy node selected yet. Go back to Step 1 before saving."}</p>
+              <p className="mt-1">{hierarchyNodeId ? "A hierarchy node has been selected and will be linked to the saved record." : "No hierarchy node selected yet. Go back to Step 1 before saving."}</p>
+              {hasUploadedMedia && (
+                <p className="mt-2 text-xs text-slate-600">
+                  Media will be stored in a new child folder named <span className="font-semibold text-slate-900">{mediaFolderName.trim() || "—"}</span> under the selected hierarchy node.
+                </p>
+              )}
             </div>
 
             {mode === "create_new" && <p className="text-sm text-slate-700">A new <strong>{selectedType}</strong> record will be created from reviewed fields.</p>}
-            {mode === "update_existing" && fields.map((field) => (
-              <div key={field.key} className="rounded-lg border border-slate-200 p-3">
-                <p className="mb-2 text-sm font-semibold text-slate-800">{field.label}</p>
+            {mode === "update_existing" && mergeableCoreFields.length === 0 && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                No core intake fields are available for merge review on the current hierarchy path.
+              </div>
+            )}
+            {mode === "update_existing" && mergeableCoreFields.map((field) => (
+              <div key={field.id} className="rounded-lg border border-slate-200 p-3">
+                <p className="mb-2 text-sm font-semibold text-slate-800">{field.effective_label}</p>
                 <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded bg-slate-50 p-2"><p className="text-xs uppercase text-slate-500">Existing</p><p>{String(existingRecord[field.key] ?? "") || "-"}</p></div>
-                  <div className="rounded bg-blue-50 p-2"><p className="text-xs uppercase text-slate-500">New Intake</p><p>{form[field.key] || "-"}</p></div>
+                  <div className="rounded bg-slate-50 p-2"><p className="text-xs uppercase text-slate-500">Existing</p><p>{String(existingRecord[field.valueKey] ?? "") || "-"}</p></div>
+                  <div className="rounded bg-blue-50 p-2"><p className="text-xs uppercase text-slate-500">New Intake</p><p>{form[field.valueKey] || "-"}</p></div>
                 </div>
                 <div className="mt-2 flex gap-2 text-xs">
                   {([
@@ -624,7 +936,7 @@ export default function IntakeReviewPage() {
                     ["append", "Append"]
                   ] as Array<[MergeMode, string]>).map(([value, label]) => (
                     <label key={value} className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1">
-                      <input type="radio" name={`merge-${field.key}`} checked={(mergeDecisions[field.key] || (field.notes ? "append" : "replace_with_new")) === value} onChange={() => setMergeDecisions((prev) => ({ ...prev, [field.key]: value }))} disabled={value === "append" && !field.notes} />
+                      <input type="radio" name={`merge-${field.valueKey}`} checked={(mergeDecisions[field.valueKey] || (field.notes ? "append" : "replace_with_new")) === value} onChange={() => setMergeDecisions((prev) => ({ ...prev, [field.valueKey]: value }))} disabled={value === "append" && !field.notes} />
                       {label}
                     </label>
                   ))}
@@ -632,7 +944,7 @@ export default function IntakeReviewPage() {
               </div>
             ))}
 
-            <button disabled={saving || session.status === "confirmed" || (mode === "update_existing" && !selectedRecordId) || selectedType === "other" || !hierarchyNodeId} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+            <button disabled={saving || session.status === "confirmed" || (mode === "update_existing" && !selectedRecordId) || selectedType === "other" || !hierarchyNodeId || (hasUploadedMedia && !mediaFolderName.trim())} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
               {saving ? "Saving..." : "Save Confirmation"}
             </button>
           </div>
@@ -666,9 +978,9 @@ export default function IntakeReviewPage() {
         <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-xs text-slate-700">{session.raw_text}</pre>
 
         <h4 className="mt-4 text-sm font-semibold text-slate-700">Media Manager</h4>
-        <p className="mt-1 text-xs text-slate-500">Uploaded files stay attached to this intake now and will inherit the selected hierarchy path after confirmation.</p>
+        <p className="mt-1 text-xs text-slate-500">Uploaded files stay attached to this intake now. On confirmation, the record stays on the selected hierarchy node while media is organized into the required child media folder.</p>
         <div className="mt-2">
-          <MediaManager intakeSessionId={session.id} compact={false} />
+          <MediaManager intakeSessionId={session.id} compact={false} onItemsChange={(items) => setMediaCount(items.length)} />
         </div>
       </aside>
     </div>

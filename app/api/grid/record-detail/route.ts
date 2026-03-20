@@ -3,6 +3,7 @@ import { createSupabaseClient } from "@/services/supabase/client";
 import { getRequestActor, hasRole } from "@/services/auth/role.service";
 import { createTimelineEvent } from "@/services/intake/confirm-intake.service";
 import { normalizeContactPhone } from "@/services/contacts/contact-linking.service";
+import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from "@/services/hierarchy/hierarchy.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
 
@@ -20,11 +21,20 @@ const relatedTypeMap: Record<GridType, "sale" | "rent" | "buyer" | "client"> = {
   client: "client"
 };
 
+
+const hierarchyFamilyByType: Record<GridType, "sale" | "rent" | "buyers" | "clients"> = {
+  sale: "sale",
+  rent: "rent",
+  buyer: "buyers",
+  client: "clients"
+};
+
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get("type") || "sale") as GridType;
   const id = searchParams.get("id") || "";
+  const hierarchyNodeId = String(searchParams.get("nodeId") || "").trim();
 
   if (!map[type] || !id) return NextResponse.json({ error: "Invalid params" }, { status: 400 });
 
@@ -121,8 +131,35 @@ export async function GET(request: NextRequest) {
     .order("name", { ascending: true })
     .limit(200);
 
+  const effectiveFields = await fetchEffectiveFieldDefinitions({
+    family: hierarchyFamilyByType[type],
+    nodeId: hierarchyNodeId || undefined
+  });
+  const customValuesByRecordId = await fetchCustomFieldValuesForRecords({
+    family: hierarchyFamilyByType[type],
+    recordIds: [id],
+    fieldDefinitionIds: effectiveFields.filter((field) => field.storage_kind === "custom_value").map((field) => field.id)
+  });
+  const customFieldById = new Map(effectiveFields.filter((field) => field.storage_kind === "custom_value").map((field) => [field.id, field.field_key]));
+  const rawCustomValues = customValuesByRecordId[id] || {};
+  const field_values: Record<string, unknown> = {};
+
+  effectiveFields.forEach((field) => {
+    if (field.storage_kind === "core_column") {
+      const sourceKey = field.core_column_name || field.field_key;
+      field_values[field.field_key] = (record as Record<string, unknown>)[sourceKey];
+      return;
+    }
+
+    Object.entries(rawCustomValues).forEach(([fieldDefinitionId, value]) => {
+      if (customFieldById.get(fieldDefinitionId) === field.field_key) field_values[field.field_key] = value;
+    });
+  });
+
   return NextResponse.json({
     record,
+    fields: effectiveFields,
+    field_values,
     linked_contact: linkedContact || null,
     linked_records,
     media: media || [],

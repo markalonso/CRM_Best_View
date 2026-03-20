@@ -5,9 +5,12 @@ import {
   assignMediaToHierarchyNode,
   assignRecordToHierarchyNode,
   assertValidRecordHierarchyDestination,
+  createOrReuseIntakeMediaChildNode,
+  fetchEffectiveFieldDefinitions,
   reviewTypeToHierarchyFamily,
   saveCustomFieldValuesForRecord
 } from "@/services/hierarchy/hierarchy.service";
+import type { EffectiveFieldDefinition } from "@/types/hierarchy";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client";
 type Mode = "create_new" | "update_existing";
@@ -21,7 +24,9 @@ type ConfirmInput = {
   extracted_data: Record<string, unknown>;
   merge_decisions: Record<string, MergeMode>;
   hierarchy_node_id?: string;
+  media_folder_name?: string;
   custom_field_values?: Array<{ fieldKey: string; value: unknown }>;
+  actor_user_id?: string | null;
 };
 
 type ConfirmResult = {
@@ -116,43 +121,110 @@ function computeMissingCritical(type: ReviewType, row: Record<string, unknown>) 
   return out;
 }
 
-function sanitizeForType(type: ReviewType, input: Record<string, unknown>) {
+async function resolveAllowedCoreFields(type: ReviewType, hierarchyNodeId?: string) {
+  const hierarchyFamily = reviewTypeToHierarchyFamily(type);
+  const dynamicFields = hierarchyFamily
+    ? await fetchEffectiveFieldDefinitions({
+        family: hierarchyFamily,
+        nodeId: hierarchyNodeId || undefined
+      }).catch(() => [] as EffectiveFieldDefinition[])
+    : [];
+
+  const dynamicCoreFields = dynamicFields.filter((field) => field.storage_kind === "core_column");
+  const dynamicCoreByColumn = new Map(
+    dynamicCoreFields.map((field) => [field.core_column_name || field.field_key, field])
+  );
+
+  allowedFieldsByType[type].forEach((fieldKey) => {
+    if (!dynamicCoreByColumn.has(fieldKey)) {
+      dynamicCoreByColumn.set(fieldKey, {
+        id: fieldKey,
+        family: hierarchyFamily || "sale",
+        field_key: fieldKey,
+        default_label: fieldKey,
+        description: null,
+        data_type: numericFields.has(fieldKey) ? "number" : fieldKey === "preferred_areas" ? "multi_select" : "text",
+        storage_kind: "core_column",
+        core_column_name: fieldKey,
+        is_system: true,
+        is_active: true,
+        is_visible_default: true,
+        is_required_default: false,
+        is_filterable_default: false,
+        is_sortable_default: false,
+        is_grid_visible_default: false,
+        is_intake_visible_default: true,
+        is_detail_visible_default: true,
+        display_order_default: 0,
+        options_json: {},
+        validation_json: {},
+        created_by: null,
+        created_at: "",
+        updated_at: "",
+        effective_label: fieldKey,
+        effective_visible: true,
+        effective_required: false,
+        effective_filterable: false,
+        effective_sortable: false,
+        effective_grid_visible: false,
+        effective_intake_visible: true,
+        effective_detail_visible: true,
+        effective_display_order: 0,
+        effective_width_px: null,
+        effective_options_json: {},
+        effective_validation_json: {},
+        override_source_node_id: null
+      });
+    }
+  });
+
+  return Array.from(dynamicCoreByColumn.values());
+}
+
+function sanitizeFieldValue(fieldKey: string, inputValue: unknown, field?: EffectiveFieldDefinition) {
+  if (numericFields.has(fieldKey)) {
+    return numericOrNull(inputValue);
+  }
+
+  if (fieldKey === "preferred_areas") {
+    return Array.isArray(inputValue)
+      ? inputValue.map((v) => text(v)).filter(Boolean)
+      : text(inputValue)
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean);
+  }
+
+  if (fieldKey === "phone") {
+    return normalizePhone(inputValue);
+  }
+
+  if (fieldKey === "furnished") {
+    const v = text(inputValue).toLowerCase();
+    return enumSets.saleRentFurnished.has(v) ? v : "unknown";
+  }
+
+  if (fieldKey === "role") {
+    const v = text(inputValue).toLowerCase();
+    return enumSets.clientRole.has(v) ? v : "owner";
+  }
+
+  if (field?.data_type === "boolean") {
+    const normalized = text(inputValue).toLowerCase();
+    if (["true", "yes", "1"].includes(normalized)) return true;
+    if (["false", "no", "0"].includes(normalized)) return false;
+  }
+
+  return text(inputValue);
+}
+
+async function sanitizeForType(type: ReviewType, input: Record<string, unknown>, hierarchyNodeId?: string) {
+  const allowedCoreFields = await resolveAllowedCoreFields(type, hierarchyNodeId);
   const out: Record<string, unknown> = {};
-  for (const field of allowedFieldsByType[type]) {
-    const value = input[field];
-    if (numericFields.has(field)) {
-      out[field] = numericOrNull(value);
-      continue;
-    }
-
-    if (field === "preferred_areas") {
-      out[field] = Array.isArray(value)
-        ? value.map((v) => text(v)).filter(Boolean)
-        : text(value)
-            .split(",")
-            .map((v) => v.trim())
-            .filter(Boolean);
-      continue;
-    }
-
-    if (field === "phone") {
-      out[field] = normalizePhone(value);
-      continue;
-    }
-
-    if (field === "furnished") {
-      const v = text(value).toLowerCase();
-      out[field] = enumSets.saleRentFurnished.has(v) ? v : "unknown";
-      continue;
-    }
-
-    if (field === "role") {
-      const v = text(value).toLowerCase();
-      out[field] = enumSets.clientRole.has(v) ? v : "owner";
-      continue;
-    }
-
-    out[field] = text(value);
+  for (const field of allowedCoreFields) {
+    const targetKey = field.core_column_name || field.field_key;
+    const inputValue = input[targetKey] ?? input[field.field_key];
+    out[targetKey] = sanitizeFieldValue(targetKey, inputValue, field);
   }
   return out;
 }
@@ -334,19 +406,44 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
   if (intakeError || !intake) throw new Error(intakeError?.message || "Intake session not found");
   if (intake.status === "confirmed") throw new Error("Intake session already confirmed");
 
-  const sanitized = sanitizeForType(input.type, input.extracted_data);
+  const sanitized = await sanitizeForType(input.type, input.extracted_data, input.hierarchy_node_id);
   const contactNameCandidate = sanitized.name || input.extracted_data.contact_name || input.extracted_data.name;
   const contactPhoneCandidate = sanitized.phone || input.extracted_data.contact_phone || input.extracted_data.phone;
   const contactId = await resolveContactId({ name: contactNameCandidate, phone: contactPhoneCandidate });
   const missingCritical = computeMissingCritical(input.type, sanitized);
   const rowStatus: "active" | "needs_review" = missingCritical.length > 0 ? "needs_review" : "active";
   const hierarchyFamily = reviewTypeToHierarchyFamily(input.type);
+  const { count: sessionMediaCount, error: mediaCountError } = await supabase
+    .from("media")
+    .select("id", { count: "exact", head: true })
+    .eq("intake_session_id", session_id);
+
+  if (mediaCountError) throw new Error(mediaCountError.message);
+  const hasSessionMedia = (sessionMediaCount || 0) > 0;
+  const mediaFolderName = String(input.media_folder_name || "").trim();
 
   if (input.hierarchy_node_id) {
     await assertValidRecordHierarchyDestination({
       family: hierarchyFamily,
       nodeId: input.hierarchy_node_id
     });
+  }
+  if (hasSessionMedia && !mediaFolderName) {
+    throw new Error("Media folder name is required when intake contains media.");
+  }
+
+  let mediaHierarchyNodeId: string | null = null;
+  let mediaHierarchyNodeName: string | null = null;
+  if (hasSessionMedia && input.hierarchy_node_id) {
+    const mediaChildNode = await createOrReuseIntakeMediaChildNode({
+      family: hierarchyFamily,
+      parentNodeId: input.hierarchy_node_id,
+      intakeSessionId: session_id,
+      folderName: mediaFolderName,
+      actorUserId: input.actor_user_id || null
+    });
+    mediaHierarchyNodeId = mediaChildNode.id;
+    mediaHierarchyNodeName = mediaChildNode.name;
   }
 
   let recordId = target_record_id || "";
@@ -434,7 +531,8 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     await assignRecordToHierarchyNode({
       family: hierarchyFamily,
       recordId,
-      nodeId: input.hierarchy_node_id
+      nodeId: input.hierarchy_node_id,
+      actorUserId: input.actor_user_id || null
     });
 
     const { data: mediaRows } = await supabase
@@ -443,15 +541,25 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
       .eq("record_type", recordType)
       .eq("record_id", recordId);
 
+    if (mediaHierarchyNodeId) {
+      await createTimelineEvent(recordType, recordId, "Created media hierarchy folder", {
+        parent_hierarchy_node_id: input.hierarchy_node_id,
+        media_hierarchy_node_id: mediaHierarchyNodeId,
+        media_folder_name: mediaHierarchyNodeName || mediaFolderName
+      });
+    }
+
     for (const mediaRow of mediaRows || []) {
       await assignMediaToHierarchyNode({
         mediaId: String(mediaRow.id),
-        nodeId: input.hierarchy_node_id
+        nodeId: mediaHierarchyNodeId || input.hierarchy_node_id,
+        actorUserId: input.actor_user_id || null
       });
     }
 
     await createTimelineEvent(recordType, recordId, "Assigned hierarchy node", {
-      hierarchy_node_id: input.hierarchy_node_id
+      hierarchy_node_id: input.hierarchy_node_id,
+      media_hierarchy_node_id: mediaHierarchyNodeId
     });
   }
 
@@ -459,7 +567,8 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     const savedCustomValues = await saveCustomFieldValuesForRecord({
       family: hierarchyFamily,
       recordId,
-      values: input.custom_field_values || []
+      values: input.custom_field_values || [],
+      actorUserId: input.actor_user_id || null
     });
 
     if (savedCustomValues.length > 0) {
@@ -473,7 +582,9 @@ export async function confirmIntakeSession(session_id: string, mode: Mode, targe
     ...((intake.ai_meta || {}) as Record<string, unknown>),
     missing_critical_fields: missingCritical,
     final_row_status: rowStatus,
-    hierarchy_node_id: input.hierarchy_node_id || null
+    hierarchy_node_id: input.hierarchy_node_id || null,
+    media_folder_name: hasSessionMedia ? mediaFolderName : null,
+    media_hierarchy_node_id: mediaHierarchyNodeId
   };
 
   const { error: intakeUpdateError } = await supabase
