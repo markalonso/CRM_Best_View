@@ -27,11 +27,28 @@ const recordLinkColumnByFamily: Record<CRMRecordFamily, "sale_id" | "rent_id" | 
   clients: "client_id"
 };
 
+const customValueColumnByFamily: Record<HierarchyNode["family"], "sale_id" | "rent_id" | "buyer_id" | "client_id" | "media_id"> = {
+  sale: "sale_id",
+  rent: "rent_id",
+  buyers: "buyer_id",
+  clients: "client_id",
+  media: "media_id"
+};
+
 export function reviewTypeToHierarchyFamily(type: ReviewHierarchyType): CRMRecordFamily {
   if (type === "sale") return "sale";
   if (type === "rent") return "rent";
   if (type === "buyer") return "buyers";
   return "clients";
+}
+
+function slugifyNodeKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
 }
 
 function normalizeNode(row: Record<string, unknown>): HierarchyNode {
@@ -369,6 +386,90 @@ export async function createHierarchyNode(input: {
   const { data, error } = await supabase.from("hierarchy_nodes").insert(payload).select("*").single();
   if (error || !data) throw new Error(error?.message || "Failed to create hierarchy node");
   return normalizeNode((data || {}) as Record<string, unknown>);
+}
+
+export async function createOrReuseIntakeMediaChildNode(input: {
+  family: CRMRecordFamily;
+  parentNodeId: string;
+  intakeSessionId: string;
+  folderName: string;
+  actorUserId?: string | null;
+}) {
+  const supabase = createSupabaseAdminClient();
+  const parent = await getNodeOrThrow(input.parentNodeId, { admin: true });
+
+  if (parent.family !== input.family) {
+    throw new Error(`Parent family ${parent.family} does not match requested family ${input.family}`);
+  }
+  if (!parent.is_active) {
+    throw new Error("Selected hierarchy destination is archived. Choose an active destination node.");
+  }
+  if (!parent.can_have_children) {
+    throw new Error("Selected hierarchy destination cannot create child media folders. Choose a branch that allows child folders or ask an admin to enable children on this node.");
+  }
+
+  const trimmedName = input.folderName.trim();
+  if (!trimmedName) {
+    throw new Error("Media folder name is required when intake contains media.");
+  }
+
+  const nodeKeyBase = slugifyNodeKey(trimmedName) || "media";
+  const deterministicSuffix = input.intakeSessionId.replace(/-/g, "").slice(0, 12);
+  const nodeKey = `${nodeKeyBase}-${deterministicSuffix}`.slice(0, 100);
+  const metadata = {
+    created_from: "intake_media_folder",
+    intake_session_id: input.intakeSessionId,
+    media_folder_name: trimmedName
+  };
+
+  const { data: existingByKey, error: existingError } = await supabase
+    .from("hierarchy_nodes")
+    .select("*")
+    .eq("family", input.family)
+    .eq("parent_id", input.parentNodeId)
+    .eq("node_key", nodeKey)
+    .maybeSingle();
+
+  if (existingError) throw new Error(existingError.message);
+  if (existingByKey) return normalizeNode(existingByKey as Record<string, unknown>);
+
+  try {
+    return await createHierarchyNode({
+      family: input.family,
+      parentId: input.parentNodeId,
+      nodeKind: "folder",
+      nodeKey,
+      name: trimmedName,
+      sortOrder: 0,
+      allowRecordAssignment: false,
+      mutationMode: "folder",
+      canHaveChildren: true,
+      canContainRecords: false,
+      isActive: true,
+      metadata,
+      actorUserId: input.actorUserId || null
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to create media child folder";
+    const normalized = message.toLowerCase();
+    if (!normalized.includes("duplicate") && !normalized.includes("unique")) {
+      throw error;
+    }
+
+    const { data: existingAfterConflict, error: retryError } = await supabase
+      .from("hierarchy_nodes")
+      .select("*")
+      .eq("family", input.family)
+      .eq("parent_id", input.parentNodeId)
+      .eq("node_key", nodeKey)
+      .single();
+
+    if (retryError || !existingAfterConflict) {
+      throw new Error(retryError?.message || message);
+    }
+
+    return normalizeNode(existingAfterConflict as Record<string, unknown>);
+  }
 }
 
 export async function createHierarchyDestinationNode(input: {
@@ -810,7 +911,7 @@ export async function saveFieldDefinition(input: {
   };
   actorUserId?: string | null;
 }) {
-  const supabase = createSupabaseClient();
+  const supabase = createSupabaseAdminClient();
   const definitionPayload = {
     family: input.family,
     field_key: input.fieldKey,
@@ -849,6 +950,11 @@ export async function saveFieldDefinition(input: {
   let override: HierarchyFieldOverride | null = null;
 
   if (input.override) {
+    const overrideNode = await getNodeOrThrow(input.override.nodeId, { admin: true });
+    if (overrideNode.family !== field.family) {
+      throw new Error(`Override node family ${overrideNode.family} does not match field family ${field.family}`);
+    }
+
     const existing = await supabase
       .from("hierarchy_field_overrides")
       .select("id")
@@ -884,6 +990,150 @@ export async function saveFieldDefinition(input: {
   }
 
   return { field, override };
+}
+
+
+export async function deleteFieldDefinition(input: {
+  fieldId: string;
+  nodeId?: string;
+}) {
+  const supabase = createSupabaseAdminClient();
+
+  const { data: fieldRow, error: fieldError } = await supabase
+    .from("field_definitions")
+    .select("*")
+    .eq("id", input.fieldId)
+    .maybeSingle();
+
+  if (fieldError) throw new Error(fieldError.message);
+  if (!fieldRow) throw new Error("Field definition not found");
+
+  const field = normalizeFieldDefinition(fieldRow as Record<string, unknown>);
+
+  if (input.nodeId) {
+    const { data: overrideRow, error: overrideLookupError } = await supabase
+      .from("hierarchy_field_overrides")
+      .select("id")
+      .eq("field_definition_id", input.fieldId)
+      .eq("node_id", input.nodeId)
+      .maybeSingle();
+
+    if (overrideLookupError) throw new Error(overrideLookupError.message);
+    if (!overrideRow) throw new Error("No override exists for the selected node");
+
+    const { error: deleteOverrideError } = await supabase
+      .from("hierarchy_field_overrides")
+      .delete()
+      .eq("id", String(overrideRow.id));
+
+    if (deleteOverrideError) throw new Error(deleteOverrideError.message);
+
+    return { action: "override_deleted" as const, field };
+  }
+
+  const deletionPolicy = getFieldDeletionPolicy(field);
+  if (!deletionPolicy.hard_delete_allowed) {
+    throw new Error(`${deletionPolicy.protection_reason} ${deletionPolicy.recommended_action}`.trim());
+  }
+
+  const [overrideCountResult, valueCountResult] = await Promise.all([
+    supabase
+      .from("hierarchy_field_overrides")
+      .select("id", { count: "exact", head: true })
+      .eq("field_definition_id", input.fieldId),
+    supabase
+      .from("record_custom_field_values")
+      .select("id", { count: "exact", head: true })
+      .eq("field_definition_id", input.fieldId)
+  ]);
+
+  if (overrideCountResult.error) throw new Error(overrideCountResult.error.message);
+  if (valueCountResult.error) throw new Error(valueCountResult.error.message);
+
+  const impact = {
+    override_count: overrideCountResult.count || 0,
+    custom_value_count: valueCountResult.count || 0
+  };
+
+  const { error: deleteError } = await supabase
+    .from("field_definitions")
+    .delete()
+    .eq("id", input.fieldId);
+
+  if (deleteError) throw new Error(deleteError.message);
+
+  return { action: "definition_deleted" as const, field, impact };
+}
+
+function getFieldDeletionPolicy(field: FieldDefinition) {
+  if (field.is_system && field.storage_kind === "core_column") {
+    return {
+      hard_delete_allowed: false,
+      protection_reason: "This field is protected because it is both system-managed and backed by a core database column.",
+      recommended_action: "Keep the definition, and use visibility or node overrides if you need to hide it."
+    };
+  }
+
+  if (field.is_system) {
+    return {
+      hard_delete_allowed: false,
+      protection_reason: "This field is protected because system fields may be referenced by core CRM workflows and automations.",
+      recommended_action: "Keep the definition, and use visibility or node overrides if you need to remove it from the UI."
+    };
+  }
+
+  if (field.storage_kind === "core_column") {
+    return {
+      hard_delete_allowed: false,
+      protection_reason: "This field is protected because deleting the definition would orphan live data still stored in a core record column.",
+      recommended_action: "Keep the definition, or convert the field to hidden/inactive behavior through configuration instead of deleting it."
+    };
+  }
+
+  return {
+    hard_delete_allowed: true,
+    protection_reason: null,
+    recommended_action: "Hard delete is allowed for custom, non-system field definitions and will also remove their stored custom values and node overrides."
+  };
+}
+
+export async function fetchFieldDeletionImpact(fieldId: string) {
+  const supabase = createSupabaseAdminClient();
+  const { data: fieldRow, error: fieldError } = await supabase
+    .from("field_definitions")
+    .select("*")
+    .eq("id", fieldId)
+    .maybeSingle();
+
+  if (fieldError) throw new Error(fieldError.message);
+  if (!fieldRow) throw new Error("Field definition not found");
+
+  const field = normalizeFieldDefinition(fieldRow as Record<string, unknown>);
+  const [overrideCountResult, valueCountResult] = await Promise.all([
+    supabase
+      .from("hierarchy_field_overrides")
+      .select("id", { count: "exact", head: true })
+      .eq("field_definition_id", fieldId),
+    supabase
+      .from("record_custom_field_values")
+      .select("id", { count: "exact", head: true })
+      .eq("field_definition_id", fieldId)
+  ]);
+
+  if (overrideCountResult.error) throw new Error(overrideCountResult.error.message);
+  if (valueCountResult.error) throw new Error(valueCountResult.error.message);
+  const deletionPolicy = getFieldDeletionPolicy(field);
+
+  return {
+    field,
+    impact: {
+      override_count: overrideCountResult.count || 0,
+      custom_value_count: valueCountResult.count || 0,
+      hard_delete_allowed: deletionPolicy.hard_delete_allowed,
+      protection_reason: deletionPolicy.protection_reason,
+      recommended_action: deletionPolicy.recommended_action
+    }
+  };
 }
 
 export async function assignRecordToHierarchyNode(input: {
@@ -957,13 +1207,56 @@ function detectValueColumns(value: unknown) {
   return { value_json: value as Record<string, unknown> | unknown[] };
 }
 
+function decodeCustomFieldValue(row: Record<string, unknown>) {
+  if (row.value_number !== null && row.value_number !== undefined) return Number(row.value_number);
+  if (row.value_boolean !== null && row.value_boolean !== undefined) return Boolean(row.value_boolean);
+  if (row.value_timestamp) return String(row.value_timestamp);
+  if (row.value_date) return String(row.value_date);
+  if (row.value_json !== null && row.value_json !== undefined) return row.value_json as Record<string, unknown> | unknown[];
+  if (row.value_text !== null && row.value_text !== undefined) return String(row.value_text);
+  return null;
+}
+
+export async function fetchCustomFieldValuesForRecords(input: {
+  family: CRMRecordFamily;
+  recordIds: string[];
+  fieldDefinitionIds?: string[];
+}) {
+  if (input.recordIds.length === 0) return {} as Record<string, Record<string, unknown>>;
+
+  const supabase = createSupabaseClient();
+  const recordColumn = customValueColumnByFamily[input.family];
+  let query = supabase
+    .from("record_custom_field_values")
+    .select(`field_definition_id,${recordColumn},value_text,value_number,value_boolean,value_date,value_timestamp,value_json`)
+    .in(recordColumn, input.recordIds);
+
+  if (input.fieldDefinitionIds?.length) {
+    query = query.in("field_definition_id", input.fieldDefinitionIds);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+
+  const valuesByRecordId = new Map<string, Record<string, unknown>>();
+  for (const row of (data || []) as Array<Record<string, unknown>>) {
+    const recordId = String(row[recordColumn] || "");
+    if (!recordId) continue;
+    const current = valuesByRecordId.get(recordId) || {};
+    current[String(row.field_definition_id || "")] = decodeCustomFieldValue(row);
+    valuesByRecordId.set(recordId, current);
+  }
+
+  return Object.fromEntries(valuesByRecordId.entries()) as Record<string, Record<string, unknown>>;
+}
+
 export async function saveCustomFieldValuesForRecord(input: {
   family: FieldDefinition["family"];
   recordId: string;
   values: Array<{ fieldKey: string; value: unknown }>;
   actorUserId?: string | null;
 }) {
-  const supabase = createSupabaseClient();
+  const supabase = createSupabaseAdminClient();
   if (input.values.length === 0) return [];
 
   const { data: defs, error: defsError } = await supabase
@@ -980,15 +1273,7 @@ export async function saveCustomFieldValuesForRecord(input: {
       .map((row) => [String(row.field_key), String(row.id)])
   );
 
-  const targetColumn = input.family === "sale"
-    ? "sale_id"
-    : input.family === "rent"
-      ? "rent_id"
-      : input.family === "buyers"
-        ? "buyer_id"
-        : input.family === "clients"
-          ? "client_id"
-          : "media_id";
+  const targetColumn = customValueColumnByFamily[input.family];
 
   const saved: Array<Record<string, unknown>> = [];
 

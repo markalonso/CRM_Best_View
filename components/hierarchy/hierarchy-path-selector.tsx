@@ -1,18 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { HierarchyNodeCreateModal } from "@/components/hierarchy/hierarchy-node-create-modal";
 import {
-  createHierarchyDestinationApi,
   fetchAllowedHierarchyDestinationsApi,
-  ensureHierarchyRootApi,
   fetchHierarchyTreeApi,
-  type HierarchyFamily,
-  type HierarchyNodeKind
+  type HierarchyFamily
 } from "@/services/api/hierarchy-api.service";
 import type { HierarchyNode, HierarchyTreeNode } from "@/types/hierarchy";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
-type CreateMode = "record" | "hybrid";
+type IntakeHierarchyFamily = Exclude<HierarchyFamily, "media">;
 
 type Props = {
   reviewType: ReviewType;
@@ -22,21 +20,7 @@ type Props = {
   onChange: (nodeId: string) => void;
 };
 
-const NODE_KIND_OPTIONS: Array<{ value: Exclude<HierarchyNodeKind, "root">; label: string }> = [
-  { value: "folder", label: "Folder" },
-  { value: "project", label: "Project" },
-  { value: "building", label: "Building" },
-  { value: "unit", label: "Unit" },
-  { value: "phase", label: "Phase" },
-  { value: "custom", label: "Custom" }
-];
-
-const CREATE_MODE_OPTIONS: Array<{ value: CreateMode; label: string; description: string }> = [
-  { value: "record", label: "Records only", description: "Creates a leaf destination that can be saved to immediately." },
-  { value: "hybrid", label: "Folder + records", description: "Creates an assignable destination that can also contain child nodes later." }
-];
-
-function reviewTypeToFamily(reviewType: ReviewType): Exclude<HierarchyFamily, "media"> | null {
+function reviewTypeToFamily(reviewType: ReviewType): IntakeHierarchyFamily | null {
   if (reviewType === "sale") return "sale";
   if (reviewType === "rent") return "rent";
   if (reviewType === "buyer") return "buyers";
@@ -52,15 +36,6 @@ function filterActiveTree(nodes: HierarchyTreeNode[]): HierarchyTreeNode[] {
   return nodes
     .filter((node) => node.is_root || node.is_active)
     .map((node) => ({ ...node, children: filterActiveTree(node.children || []) }));
-}
-
-function slugifyNodeKey(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 100);
 }
 
 function formatApiError(error: unknown) {
@@ -116,9 +91,7 @@ function TreeOption({
             ? "border-slate-900 bg-slate-900 text-white"
             : isParent
               ? "border-blue-300 bg-blue-50 text-slate-800"
-              : selectable
-                ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
         }`}
         style={{ paddingLeft: `${node.depth * 16 + 12}px` }}
       >
@@ -167,11 +140,6 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
   const [allowedNodeIds, setAllowedNodeIds] = useState<Set<string>>(new Set());
   const [browseNodeId, setBrowseNodeId] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const [createName, setCreateName] = useState("");
-  const [createKey, setCreateKey] = useState("");
-  const [createKind, setCreateKind] = useState<Exclude<HierarchyNodeKind, "root">>("unit");
-  const [createMode, setCreateMode] = useState<CreateMode>("record");
-  const [creating, setCreating] = useState(false);
 
   const visibleTree = useMemo(() => filterActiveTree(tree), [tree]);
   const flatNodes = useMemo(() => flattenTree(visibleTree), [visibleTree]);
@@ -184,13 +152,13 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
   const createParentLabel = createParent?.path_text || createParent?.name || `${family} root`;
   const canCreateUnderParent = Boolean(createParent?.can_have_children);
 
-  async function loadTree(nextFamily: HierarchyFamily, preferredNodeId?: string) {
+  async function loadTree(nextFamily: IntakeHierarchyFamily, preferredNodeId?: string) {
     setLoading(true);
     setError("");
     try {
       const [result, destinationResult] = await Promise.all([
         fetchHierarchyTreeApi(nextFamily),
-        nextFamily === "media" ? Promise.resolve({ nodes: [] as HierarchyNode[] }) : fetchAllowedHierarchyDestinationsApi(nextFamily)
+        fetchAllowedHierarchyDestinationsApi(nextFamily)
       ]);
       const nextTree = filterActiveTree(result.tree || []);
       const allowedIds = new Set((destinationResult.nodes || []).map((node) => node.id));
@@ -248,62 +216,6 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
     if (rootNode) setBrowseNodeId(rootNode.id);
   }, [browseNodeId, nodeById, rootNode, selectedNode]);
 
-  async function handleCreateNode() {
-    if (!family || !createName.trim() || !createKey.trim()) return;
-    if (!createParent) {
-      setError("Create or load the family root before creating destination nodes from intake.");
-      return;
-    }
-    if (!createParent.can_have_children) {
-      setError("The selected parent branch cannot contain child nodes. Choose another branch before creating a destination.");
-      return;
-    }
-
-    setCreating(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await createHierarchyDestinationApi({
-        family,
-        parentId: createParent.id,
-        name: createName.trim(),
-        nodeKey: createKey.trim(),
-        nodeKind: createKind,
-        creationMode: createMode
-      });
-      setNotice(`Created ${result.node.name} and selected it as the save destination.`);
-      setCreateName("");
-      setCreateKey("");
-      setCreateKind("unit");
-      setCreateMode("record");
-      setCreateOpen(false);
-      await loadTree(family, result.node.id);
-      setBrowseNodeId(result.node.id);
-      onChange(result.node.id);
-    } catch (createError) {
-      setError(formatApiError(createError));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function handleEnsureRoot() {
-    if (!family) return;
-    setCreating(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await ensureHierarchyRootApi(family);
-      setNotice(`Ensured ${result.node.name} root. Select a branch and create a destination node if needed.`);
-      await loadTree(family, result.node.id);
-      setBrowseNodeId(result.node.id);
-    } catch (createError) {
-      setError(formatApiError(createError));
-    } finally {
-      setCreating(false);
-    }
-  }
-
   if (!family) {
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
@@ -315,188 +227,156 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
   const showNoTargetsMessage = !loading && tree.length > 0 && assignableNodes.length === 0;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h3 className="text-sm font-semibold text-slate-900">Hierarchy path</h3>
-          <p className="mt-1 text-sm text-slate-600">Pick an active record-ready destination before saving. Admins can create a new destination node when the correct path does not exist yet.</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => loadTree(family, selectedNodeId || browseNodeId || undefined)}
-            disabled={loading}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          >
-            {loading ? "Refreshing..." : "Refresh paths"}
-          </button>
-          {canCreate && (
+    <>
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Hierarchy path</h3>
+            <p className="mt-1 text-sm text-slate-600">Pick an active record-ready destination before saving. Admins can use Add Folder to extend the path with the same full hierarchy modal used elsewhere.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => setCreateOpen((value) => !value)}
-              disabled={disabled || !rootNode}
+              onClick={() => loadTree(family, selectedNodeId || browseNodeId || undefined)}
+              disabled={loading}
               className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
-              {createOpen ? "Cancel new destination" : "Create destination"}
+              {loading ? "Refreshing..." : "Refresh paths"}
             </button>
-          )}
-        </div>
-      </div>
-
-      {(error || notice) && (
-        <div className={`mt-3 rounded-lg border px-3 py-2 text-sm ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
-          {error || notice}
-        </div>
-      )}
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <div>
-          {loading ? (
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Loading hierarchy paths…</div>
-          ) : tree.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
-              No hierarchy nodes are available for this family yet. {canCreate ? "Create the family root first, then add an assignable destination node." : "Ask an admin to create the needed path."}
-              {canCreate && (
-                <div className="mt-3">
-                  <button
-                    type="button"
-                    onClick={handleEnsureRoot}
-                    disabled={creating}
-                    className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-                  >
-                    {creating ? "Creating root..." : "Create family root"}
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
-              {showNoTargetsMessage && (
-                <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                  {canCreate
-                    ? "No active save-ready destinations exist yet. Select the parent branch where the record should live, then create a destination node below."
-                    : "No active save-ready destinations exist yet for this family. Ask an admin to create one before saving this intake."}
-                </div>
-              )}
-              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2">
-                {visibleTree.map((node) => (
-                  <TreeOption
-                    key={node.id}
-                    node={node}
-                    allowedNodeIds={allowedNodeIds}
-                    selectedNodeId={selectedNodeId}
-                    parentNodeId={createParent?.id || ""}
-                    canCreate={canCreate}
-                    onBrowse={(nextNode) => {
-                      setBrowseNodeId(nextNode.id);
-                      setNotice("");
-                      if (allowedNodeIds.has(nextNode.id)) setError("");
-                    }}
-                    onSelectDestination={(nextNode) => {
-                      setBrowseNodeId(nextNode.id);
-                      onChange(nextNode.id);
-                      setError("");
-                      setNotice("");
-                    }}
-                  />
-                ))}
-              </div>
-            </>
-          )}
+            {canCreate && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError("");
+                  setNotice("");
+                  setCreateOpen(true);
+                }}
+                disabled={disabled}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Add Folder
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+        {(error || notice) && (
+          <div className={`mt-3 rounded-lg border px-3 py-2 text-sm ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+            {error || notice}
+          </div>
+        )}
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected destination</p>
-            {selectedNode ? (
+            {loading ? (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Loading hierarchy paths…</div>
+            ) : tree.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+                No hierarchy nodes are available for this family yet. {canCreate ? "Use Add Folder to create the family root and then the correct branch/destination path." : "Ask an admin to create the needed path."}
+              </div>
+            ) : (
               <>
-                <p className="mt-2 text-base font-semibold text-slate-900">{selectedNode.name}</p>
-                <p className="mt-1 text-sm text-slate-600">{selectedNode.path_text}</p>
-                <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold uppercase">
-                  <span className="rounded bg-slate-200 px-2 py-1 text-slate-700">{selectedNode.node_kind}</span>
-                  <span className="rounded bg-emerald-100 px-2 py-1 text-emerald-700">record-ready</span>
+                {showNoTargetsMessage && (
+                  <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {canCreate
+                      ? "No active save-ready destinations exist yet. Select the parent branch where the record should live, then use Add Folder to create the correct branch or destination node."
+                      : "No active save-ready destinations exist yet for this family. Ask an admin to create one before saving this intake."}
+                  </div>
+                )}
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2">
+                  {visibleTree.map((node) => (
+                    <TreeOption
+                      key={node.id}
+                      node={node}
+                      allowedNodeIds={allowedNodeIds}
+                      selectedNodeId={selectedNodeId}
+                      parentNodeId={createParent?.id || ""}
+                      canCreate={canCreate}
+                      onBrowse={(nextNode) => {
+                        setBrowseNodeId(nextNode.id);
+                        setNotice("");
+                        if (allowedNodeIds.has(nextNode.id)) setError("");
+                      }}
+                      onSelectDestination={(nextNode) => {
+                        setBrowseNodeId(nextNode.id);
+                        onChange(nextNode.id);
+                        setError("");
+                        setNotice("");
+                      }}
+                    />
+                  ))}
                 </div>
               </>
-            ) : (
-              <div className="mt-2 rounded-lg border border-dashed border-amber-300 bg-white p-3 text-sm text-amber-800">
-                No hierarchy destination selected yet. Choose an active save-ready node before saving this intake.
-              </div>
             )}
           </div>
 
-          <div className="rounded-lg bg-white p-3 text-sm text-slate-600">
-            <p className="font-medium text-slate-800">Available save targets</p>
-            <p className="mt-1">{assignableNodes.length} active assignable node{assignableNodes.length === 1 ? "" : "s"} found for this family.</p>
-            {!canCreate && <p className="mt-2 text-xs text-slate-500">Only admins can create new destination nodes from intake.</p>}
-          </div>
-
-          {canCreate && (
-            <div className="rounded-lg bg-white p-3 text-sm text-slate-600">
-              <p className="font-medium text-slate-800">Create under branch</p>
-              <p className="mt-1">{createParentLabel}</p>
-              {!canCreateUnderParent && createParent && (
-                <p className="mt-2 text-xs text-amber-700">This branch is a leaf and cannot contain children. Select another parent branch in the tree first.</p>
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected destination</p>
+              {selectedNode ? (
+                <>
+                  <p className="mt-2 text-base font-semibold text-slate-900">{selectedNode.name}</p>
+                  <p className="mt-1 text-sm text-slate-600">{selectedNode.path_text}</p>
+                  <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold uppercase">
+                    <span className="rounded bg-slate-200 px-2 py-1 text-slate-700">{selectedNode.node_kind}</span>
+                    <span className="rounded bg-emerald-100 px-2 py-1 text-emerald-700">record-ready</span>
+                  </div>
+                </>
+              ) : (
+                <div className="mt-2 rounded-lg border border-dashed border-amber-300 bg-white p-3 text-sm text-amber-800">
+                  No hierarchy destination selected yet. Choose an active save-ready node before saving this intake.
+                </div>
               )}
             </div>
-          )}
 
-          {canCreate && createOpen && (
-            <div className="rounded-lg border border-slate-200 bg-white p-3">
-              <p className="text-sm font-semibold text-slate-800">Create destination node</p>
-              <p className="mt-1 text-xs text-slate-500">This uses the backend hierarchy destination route and automatically creates an active assignable node for intake saving.</p>
-              <div className="mt-3 space-y-3">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Node name</label>
-                  <input
-                    value={createName}
-                    onChange={(e) => {
-                      const nextName = e.target.value;
-                      setCreateName(nextName);
-                      setCreateKey((current) => (current ? current : slugifyNodeKey(nextName)));
-                    }}
-                    placeholder="Unit 101"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Stable key</label>
-                  <input
-                    value={createKey}
-                    onChange={(e) => setCreateKey(slugifyNodeKey(e.target.value))}
-                    placeholder="unit-101"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Node kind</label>
-                  <select value={createKind} onChange={(e) => setCreateKind(e.target.value as Exclude<HierarchyNodeKind, "root">)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
-                    {NODE_KIND_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Destination behavior</label>
-                  <select value={createMode} onChange={(e) => setCreateMode(e.target.value as CreateMode)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
-                    {CREATE_MODE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-xs text-slate-500">{CREATE_MODE_OPTIONS.find((option) => option.value === createMode)?.description}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleCreateNode}
-                  disabled={creating || !canCreateUnderParent || !createName.trim() || !createKey.trim()}
-                  className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  {creating ? "Creating..." : "Create destination and select it"}
-                </button>
-              </div>
+            <div className="rounded-lg bg-white p-3 text-sm text-slate-600">
+              <p className="font-medium text-slate-800">Available save targets</p>
+              <p className="mt-1">{assignableNodes.length} active assignable node{assignableNodes.length === 1 ? "" : "s"} found for this family.</p>
+              {!canCreate && <p className="mt-2 text-xs text-slate-500">Only admins can create new destination nodes from intake.</p>}
             </div>
-          )}
+
+            {canCreate && (
+              <div className="rounded-lg bg-white p-3 text-sm text-slate-600">
+                <p className="font-medium text-slate-800">Create under branch</p>
+                <p className="mt-1">{createParentLabel}</p>
+                {!canCreateUnderParent && createParent && (
+                  <p className="mt-2 text-xs text-amber-700">This branch is a leaf and cannot contain children. Select another parent branch in the tree first.</p>
+                )}
+                <p className="mt-2 text-xs text-slate-500">Add Folder opens the shared hierarchy modal with folder-only, record-container, folder + record, and immediate field configuration support.</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+
+      {canCreate && createOpen && (
+        <HierarchyNodeCreateModal
+          open={createOpen}
+          family={family}
+          parentNode={createParent}
+          onClose={() => setCreateOpen(false)}
+          onRootReady={async (rootNodeId) => {
+            await loadTree(family, rootNodeId);
+            setBrowseNodeId(rootNodeId);
+            setNotice("Family root is ready. You can keep adding the destination path from here.");
+          }}
+          onCreated={async (node) => {
+            const createdIsAssignable = node.is_active && node.can_contain_records && node.allow_record_assignment && !node.is_root;
+
+            await loadTree(family, node.id);
+            setBrowseNodeId(node.id);
+            setCreateOpen(false);
+
+            if (createdIsAssignable) {
+              onChange(node.id);
+              setNotice(`Created ${node.name} and selected it as the save destination.`);
+              return;
+            }
+
+            setNotice(`Created ${node.name}. It is folder-only, so choose a record-ready child before saving.`);
+          }}
+        />
+      )}
+    </>
   );
 }
