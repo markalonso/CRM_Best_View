@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { getRequestActor, hasRole } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
+import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from "@/services/hierarchy/hierarchy.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
 
@@ -147,7 +148,7 @@ async function resolveHierarchyRecordIds(supabase: ReturnType<typeof createSupab
   if (String(node.family) !== family) {
     throw new Error(`Hierarchy node family ${String(node.family)} does not match grid type ${type}`);
   }
-  if (!node.is_active || node.is_root || !node.can_contain_records || !node.allow_record_assignment) {
+  if (!node.is_active) {
     return [];
   }
 
@@ -192,6 +193,12 @@ export async function GET(request: NextRequest) {
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+
+  const hierarchyFamily = hierarchyFamilyByType[type];
+  const effectiveFields = await fetchEffectiveFieldDefinitions({
+    family: hierarchyFamily,
+    nodeId: hierarchyNodeId || undefined
+  });
 
   let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
 
@@ -333,6 +340,26 @@ export async function GET(request: NextRequest) {
   });
 
   let rows: Array<Record<string, unknown>> = safeRows.map((row) => ({ ...row, media_counts: mediaMap.get(String(row.id || "")) || { images: 0, videos: 0, documents: 0 } }));
+
+  const customGridFields = effectiveFields.filter((field) => field.storage_kind === "custom_value" && field.effective_grid_visible);
+  if (customGridFields.length > 0 && ids.length > 0) {
+    const valuesByRecordId = await fetchCustomFieldValuesForRecords({
+      family: hierarchyFamily,
+      recordIds: ids,
+      fieldDefinitionIds: customGridFields.map((field) => field.id)
+    });
+
+    const customFieldById = new Map(customGridFields.map((field) => [field.id, field.field_key]));
+    rows = rows.map((row) => {
+      const customValues = valuesByRecordId[String(row.id || "")] || {};
+      const nextRow = { ...row };
+      Object.entries(customValues).forEach(([fieldDefinitionId, value]) => {
+        const fieldKey = customFieldById.get(fieldDefinitionId);
+        if (fieldKey) nextRow[fieldKey] = value;
+      });
+      return nextRow;
+    });
+  }
 
   if (type === "client" && filters.has_active_listings) {
     const { data: saleLinks } = ids.length ? await supabase.from("properties_sale").select("client_id, status").in("client_id", ids) : { data: [] };

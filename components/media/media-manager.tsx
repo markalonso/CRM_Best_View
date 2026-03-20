@@ -10,9 +10,10 @@ type Props = {
   recordType?: "properties_sale" | "properties_rent" | "buyers" | "clients";
   recordId?: string;
   compact?: boolean;
+  onItemsChange?: (items: MediaItem[]) => void;
 };
 
-export function MediaManager({ intakeSessionId, recordType, recordId, compact = false }: Props) {
+export function MediaManager({ intakeSessionId, recordType, recordId, compact = false, onItemsChange }: Props) {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [warning, setWarning] = useState("");
@@ -35,8 +36,10 @@ export function MediaManager({ intakeSessionId, recordType, recordId, compact = 
   const load = useCallback(async () => {
     const res = await fetch(`/api/media?${query}`, { cache: "no-store" });
     const data = await res.json();
-    setItems(data.media || []);
-  }, [query]);
+    const nextItems = (data.media || []) as MediaItem[];
+    setItems(nextItems);
+    onItemsChange?.(nextItems);
+  }, [onItemsChange, query]);
 
   useEffect(() => {
     load();

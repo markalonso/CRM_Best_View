@@ -1,20 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { ConfirmationModal } from "@/components/ui/confirmation-modal";
 import { useAuth } from "@/hooks/use-auth";
 import {
   archiveHierarchyNodeApi,
   createHierarchyNodeApi,
+  deleteHierarchyFieldApi,
   deleteHierarchyNodeApi,
   ensureHierarchyRootApi,
   fetchFieldDefinitionsApi,
+  fetchHierarchyFieldDeleteImpactApi,
   fetchHierarchyNodeDetailsApi,
   fetchHierarchyTreeApi,
+  saveFieldDefinitionApi,
   updateHierarchyNodeApi,
   type HierarchyFamily,
   type HierarchyNodeKind
 } from "@/services/api/hierarchy-api.service";
-import type { EffectiveFieldDefinition, HierarchyNode, HierarchyNodeDetails, HierarchyTreeNode } from "@/types/hierarchy";
+import type { EffectiveFieldDefinition, FieldDataType, FieldStorageKind, HierarchyNode, HierarchyNodeDetails, HierarchyTreeNode } from "@/types/hierarchy";
 
 type NodeMutationMode = "folder" | "record" | "hybrid";
 
@@ -39,6 +43,24 @@ const CHILD_MODE_OPTIONS: Array<{ value: NodeMutationMode; label: string; descri
   { value: "folder", label: "Folder child", description: "Navigation-only child that can hold more nested nodes." },
   { value: "record", label: "Record container", description: "Leaf-like destination that intake and records can be assigned into." },
   { value: "hybrid", label: "Folder + record", description: "Can both hold children and receive records when you need a mixed node." }
+];
+
+const FIELD_TYPE_OPTIONS: Array<{ value: FieldDataType; label: string }> = [
+  { value: "text", label: "Text" },
+  { value: "long_text", label: "Long text" },
+  { value: "integer", label: "Integer" },
+  { value: "number", label: "Number" },
+  { value: "boolean", label: "Boolean" },
+  { value: "date", label: "Date" },
+  { value: "timestamp", label: "Timestamp" },
+  { value: "single_select", label: "Single select" },
+  { value: "multi_select", label: "Multi select" },
+  { value: "json", label: "JSON" }
+];
+
+const FIELD_STORAGE_OPTIONS: Array<{ value: FieldStorageKind; label: string }> = [
+  { value: "custom_value", label: "Custom value" },
+  { value: "core_column", label: "Core column" }
 ];
 
 function flattenTree(nodes: HierarchyTreeNode[]): HierarchyNode[] {
@@ -76,6 +98,21 @@ function behaviorFromMode(mode: NodeMutationMode) {
 function formatParentLabel(details: HierarchyNodeDetails | null) {
   if (!details?.parent) return "No parent (family root)";
   return details.parent.name;
+}
+
+type FieldDeleteImpact = {
+  override_count: number;
+  custom_value_count: number;
+  hard_delete_allowed: boolean;
+};
+
+
+function hasNodeOverride(field: EffectiveFieldDefinition, nodeId?: string) {
+  return Boolean(nodeId && field.override_source_node_id === nodeId);
+}
+
+function stringifyJson(value: Record<string, unknown> | null | undefined) {
+  return value ? JSON.stringify(value, null, 2) : "{}";
 }
 
 function TreeRow({
@@ -133,6 +170,10 @@ export function HierarchyManager() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [deleteNodeOpen, setDeleteNodeOpen] = useState(false);
+  const [deleteFieldTarget, setDeleteFieldTarget] = useState<EffectiveFieldDefinition | null>(null);
+  const [deleteFieldImpact, setDeleteFieldImpact] = useState<FieldDeleteImpact | null>(null);
+  const [deleteFieldLoading, setDeleteFieldLoading] = useState(false);
 
   const [editName, setEditName] = useState("");
   const [editKey, setEditKey] = useState("");
@@ -145,11 +186,41 @@ export function HierarchyManager() {
   const [childKind, setChildKind] = useState<HierarchyNodeKind>("folder");
   const [childMode, setChildMode] = useState<NodeMutationMode>("folder");
 
+  const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [fieldKeyInput, setFieldKeyInput] = useState("");
+  const [fieldLabelInput, setFieldLabelInput] = useState("");
+  const [fieldDescriptionInput, setFieldDescriptionInput] = useState("");
+  const [fieldTypeInput, setFieldTypeInput] = useState<FieldDataType>("text");
+  const [fieldStorageInput, setFieldStorageInput] = useState<FieldStorageKind>("custom_value");
+  const [fieldCoreColumnInput, setFieldCoreColumnInput] = useState("");
+  const [fieldDisplayOrderInput, setFieldDisplayOrderInput] = useState("100");
+  const [fieldVisibleInput, setFieldVisibleInput] = useState(true);
+  const [fieldRequiredInput, setFieldRequiredInput] = useState(false);
+  const [fieldGridVisibleInput, setFieldGridVisibleInput] = useState(true);
+  const [fieldIntakeVisibleInput, setFieldIntakeVisibleInput] = useState(true);
+  const [fieldDetailVisibleInput, setFieldDetailVisibleInput] = useState(true);
+  const [fieldFilterableInput, setFieldFilterableInput] = useState(true);
+  const [fieldSortableInput, setFieldSortableInput] = useState(true);
+  const [fieldOptionsInput, setFieldOptionsInput] = useState("{}");
+  const [fieldValidationInput, setFieldValidationInput] = useState("{}");
+
+  const [overrideLabelInput, setOverrideLabelInput] = useState("");
+  const [overrideDisplayOrderInput, setOverrideDisplayOrderInput] = useState("");
+  const [overrideWidthInput, setOverrideWidthInput] = useState("");
+  const [overrideVisibleInput, setOverrideVisibleInput] = useState(true);
+  const [overrideRequiredInput, setOverrideRequiredInput] = useState(false);
+  const [overrideGridVisibleInput, setOverrideGridVisibleInput] = useState(true);
+  const [overrideIntakeVisibleInput, setOverrideIntakeVisibleInput] = useState(true);
+  const [overrideDetailVisibleInput, setOverrideDetailVisibleInput] = useState(true);
+  const [overrideFilterableInput, setOverrideFilterableInput] = useState(true);
+  const [overrideSortableInput, setOverrideSortableInput] = useState(true);
+
   const flatNodes = useMemo(() => flattenTree(tree), [tree]);
   const selectedNode = flatNodes.find((node) => node.id === selectedId) || null;
   const rootNode = tree[0] || null;
   const selectedAssignable = Boolean(selectedNode && selectedNode.allow_record_assignment && selectedNode.is_active && !selectedNode.is_root);
   const availableChildModes = family === "media" ? CHILD_MODE_OPTIONS.filter((option) => option.value === "folder") : CHILD_MODE_OPTIONS;
+  const editingField = fields.find((field) => field.id === editingFieldId) || null;
 
   async function loadTree(nextFamily = family, preferredNodeId?: string) {
     setLoading(true);
@@ -231,6 +302,65 @@ export function HierarchyManager() {
       setChildKind("folder");
     }
   }, [childMode, family]);
+
+  useEffect(() => {
+    if (!editingField) {
+      setFieldKeyInput("");
+      setFieldLabelInput("");
+      setFieldDescriptionInput("");
+      setFieldTypeInput("text");
+      setFieldStorageInput("custom_value");
+      setFieldCoreColumnInput("");
+      setFieldDisplayOrderInput("100");
+      setFieldVisibleInput(true);
+      setFieldRequiredInput(false);
+      setFieldGridVisibleInput(true);
+      setFieldIntakeVisibleInput(true);
+      setFieldDetailVisibleInput(true);
+      setFieldFilterableInput(true);
+      setFieldSortableInput(true);
+      setFieldOptionsInput("{}");
+      setFieldValidationInput("{}");
+      setOverrideLabelInput("");
+      setOverrideDisplayOrderInput("");
+      setOverrideWidthInput("");
+      setOverrideVisibleInput(true);
+      setOverrideRequiredInput(false);
+      setOverrideGridVisibleInput(true);
+      setOverrideIntakeVisibleInput(true);
+      setOverrideDetailVisibleInput(true);
+      setOverrideFilterableInput(true);
+      setOverrideSortableInput(true);
+      return;
+    }
+
+    setFieldKeyInput(editingField.field_key);
+    setFieldLabelInput(editingField.default_label);
+    setFieldDescriptionInput(editingField.description || "");
+    setFieldTypeInput(editingField.data_type);
+    setFieldStorageInput(editingField.storage_kind);
+    setFieldCoreColumnInput(editingField.core_column_name || "");
+    setFieldDisplayOrderInput(String(editingField.display_order_default));
+    setFieldVisibleInput(editingField.is_visible_default);
+    setFieldRequiredInput(editingField.is_required_default);
+    setFieldGridVisibleInput(editingField.is_grid_visible_default);
+    setFieldIntakeVisibleInput(editingField.is_intake_visible_default);
+    setFieldDetailVisibleInput(editingField.is_detail_visible_default);
+    setFieldFilterableInput(editingField.is_filterable_default);
+    setFieldSortableInput(editingField.is_sortable_default);
+    setFieldOptionsInput(stringifyJson(editingField.options_json));
+    setFieldValidationInput(stringifyJson(editingField.validation_json));
+    setOverrideLabelInput(editingField.override_source_node_id === selectedId ? (editingField.effective_label === editingField.default_label ? "" : editingField.effective_label) : "");
+    setOverrideDisplayOrderInput(editingField.override_source_node_id === selectedId && editingField.effective_display_order !== editingField.display_order_default ? String(editingField.effective_display_order) : "");
+    setOverrideWidthInput(editingField.override_source_node_id === selectedId && editingField.effective_width_px ? String(editingField.effective_width_px) : "");
+    setOverrideVisibleInput(editingField.effective_visible);
+    setOverrideRequiredInput(editingField.effective_required);
+    setOverrideGridVisibleInput(editingField.effective_grid_visible);
+    setOverrideIntakeVisibleInput(editingField.effective_intake_visible);
+    setOverrideDetailVisibleInput(editingField.effective_detail_visible);
+    setOverrideFilterableInput(editingField.effective_filterable);
+    setOverrideSortableInput(editingField.effective_sortable);
+  }, [editingField, selectedId]);
 
   async function handleSelect(node: HierarchyNode) {
     setSelectedId(node.id);
@@ -343,8 +473,6 @@ export function HierarchyManager() {
 
   async function handleDelete() {
     if (!selectedNode) return;
-    const confirmed = window.confirm(`Delete ${selectedNode.name}? This only works when the node has no child nodes, records, or media.`);
-    if (!confirmed) return;
 
     setSaving(true);
     setError("");
@@ -357,6 +485,21 @@ export function HierarchyManager() {
       setError(deleteError instanceof Error ? deleteError.message : "Failed to delete node");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function openDeleteFieldModal(field: EffectiveFieldDefinition) {
+    setDeleteFieldTarget(field);
+    setDeleteFieldImpact(null);
+    setDeleteFieldLoading(true);
+    setError("");
+    try {
+      const result = await fetchHierarchyFieldDeleteImpactApi(field.id);
+      setDeleteFieldImpact(result.impact);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load field delete impact");
+    } finally {
+      setDeleteFieldLoading(false);
     }
   }
 
@@ -375,6 +518,182 @@ export function HierarchyManager() {
     }
   }
 
+  function startCreateField() {
+    setEditingFieldId(null);
+    setFieldKeyInput("");
+    setFieldLabelInput("");
+    setFieldDescriptionInput("");
+    setFieldTypeInput("text");
+    setFieldStorageInput("custom_value");
+    setFieldCoreColumnInput("");
+    setFieldDisplayOrderInput("100");
+    setFieldVisibleInput(true);
+    setFieldRequiredInput(false);
+    setFieldGridVisibleInput(true);
+    setFieldIntakeVisibleInput(true);
+    setFieldDetailVisibleInput(true);
+    setFieldFilterableInput(true);
+    setFieldSortableInput(true);
+    setFieldOptionsInput("{}");
+    setFieldValidationInput("{}");
+  }
+
+  function startEditField(field: EffectiveFieldDefinition) {
+    setEditingFieldId(field.id);
+  }
+
+  function parseJsonInput(value: string, fieldName: string) {
+    try {
+      const parsed = JSON.parse(value || "{}");
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        throw new Error(`${fieldName} must be a JSON object.`);
+      }
+      return parsed as Record<string, unknown>;
+    } catch (jsonError) {
+      throw new Error(jsonError instanceof Error && jsonError.message.includes(fieldName) ? jsonError.message : `${fieldName} must be valid JSON.`);
+    }
+  }
+
+  async function handleSaveFieldDefinition() {
+    if (!fieldKeyInput.trim() || !fieldLabelInput.trim()) {
+      setError("Field key and default label are required.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const optionsJson = parseJsonInput(fieldOptionsInput, "Options JSON");
+      const validationJson = parseJsonInput(fieldValidationInput, "Validation JSON");
+
+      const result = await saveFieldDefinitionApi({
+        id: editingFieldId || undefined,
+        family,
+        fieldKey: fieldKeyInput.trim(),
+        defaultLabel: fieldLabelInput.trim(),
+        description: fieldDescriptionInput.trim() || null,
+        dataType: fieldTypeInput,
+        storageKind: fieldStorageInput,
+        coreColumnName: fieldStorageInput === "core_column" ? fieldCoreColumnInput.trim() || null : null,
+        isSystem: editingField?.is_system ?? false,
+        isActive: true,
+        isVisibleDefault: fieldVisibleInput,
+        isRequiredDefault: fieldRequiredInput,
+        isFilterableDefault: fieldFilterableInput,
+        isSortableDefault: fieldSortableInput,
+        isGridVisibleDefault: fieldGridVisibleInput,
+        isIntakeVisibleDefault: fieldIntakeVisibleInput,
+        isDetailVisibleDefault: fieldDetailVisibleInput,
+        displayOrderDefault: Number(fieldDisplayOrderInput || 100),
+        optionsJson,
+        validationJson
+      });
+
+      setNotice(`${result.field.default_label || fieldLabelInput.trim()} saved.`);
+      await loadTree(family, selectedId || undefined);
+      setEditingFieldId(result.field.id || editingFieldId);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save field definition");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveFieldOverride() {
+    if (!selectedNode || !editingField) {
+      setError("Select a node and a field before saving an override.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const optionsJson = parseJsonInput(fieldOptionsInput, "Options JSON");
+      const validationJson = parseJsonInput(fieldValidationInput, "Validation JSON");
+      await saveFieldDefinitionApi({
+        id: editingField.id,
+        family,
+        fieldKey: fieldKeyInput.trim(),
+        defaultLabel: fieldLabelInput.trim(),
+        description: fieldDescriptionInput.trim() || null,
+        dataType: fieldTypeInput,
+        storageKind: fieldStorageInput,
+        coreColumnName: fieldStorageInput === "core_column" ? fieldCoreColumnInput.trim() || null : null,
+        isSystem: editingField.is_system,
+        isActive: editingField.is_active,
+        isVisibleDefault: fieldVisibleInput,
+        isRequiredDefault: fieldRequiredInput,
+        isFilterableDefault: fieldFilterableInput,
+        isSortableDefault: fieldSortableInput,
+        isGridVisibleDefault: fieldGridVisibleInput,
+        isIntakeVisibleDefault: fieldIntakeVisibleInput,
+        isDetailVisibleDefault: fieldDetailVisibleInput,
+        displayOrderDefault: Number(fieldDisplayOrderInput || editingField.display_order_default),
+        optionsJson,
+        validationJson,
+        override: {
+          nodeId: selectedNode.id,
+          overrideLabel: overrideLabelInput.trim() || null,
+          isVisible: overrideVisibleInput,
+          isRequired: overrideRequiredInput,
+          isFilterable: overrideFilterableInput,
+          isSortable: overrideSortableInput,
+          isGridVisible: overrideGridVisibleInput,
+          isIntakeVisible: overrideIntakeVisibleInput,
+          isDetailVisible: overrideDetailVisibleInput,
+          displayOrder: overrideDisplayOrderInput ? Number(overrideDisplayOrderInput) : null,
+          widthPx: overrideWidthInput ? Number(overrideWidthInput) : null
+        }
+      });
+
+      setNotice(`Override saved for ${editingField.default_label}.`);
+      await loadSelectedNode(selectedNode.id);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save field override");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteField(field: EffectiveFieldDefinition) {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await deleteHierarchyFieldApi(field.id);
+      setNotice(`${field.default_label} deleted permanently.${result.impact ? ` Removed ${result.impact.custom_value_count} stored value(s) and ${result.impact.override_count} override(s).` : ""}`);
+      setDeleteFieldTarget(null);
+      setDeleteFieldImpact(null);
+      if (editingFieldId === field.id) startCreateField();
+      await loadTree(family, selectedId || undefined);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete field");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleResetOverride(field: EffectiveFieldDefinition) {
+    if (!selectedNode) return;
+    const confirmed = window.confirm(`Reset the node-specific override for ${field.default_label}?`);
+    if (!confirmed) return;
+
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await deleteHierarchyFieldApi(field.id, { nodeId: selectedNode.id });
+      setNotice(`Override removed for ${field.default_label}.`);
+      await loadSelectedNode(selectedNode.id);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to reset override");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (authLoading) {
     return <section className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">Checking permissions...</section>;
   }
@@ -388,6 +707,7 @@ export function HierarchyManager() {
   }
 
   return (
+    <>
     <section className="space-y-4">
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -569,7 +889,7 @@ export function HierarchyManager() {
                       <button disabled={saving || selectedNode.is_root} onClick={handleToggleArchive} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
                         {selectedNode.is_active ? "Archive node" : "Restore node"}
                       </button>
-                      <button disabled={saving || selectedNode.is_root} onClick={handleDelete} className="rounded-lg border border-rose-300 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40">
+                      <button disabled={saving || selectedNode.is_root} onClick={() => setDeleteNodeOpen(true)} className="rounded-lg border border-rose-300 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40">
                         Delete node
                       </button>
                     </div>
@@ -650,35 +970,245 @@ export function HierarchyManager() {
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h3 className="text-sm font-semibold text-slate-800">Effective fields for selected node</h3>
-                <p className="text-xs text-slate-500">This preview reflects the resolved labels and visibility metadata returned by the backend.</p>
+                <h3 className="text-sm font-semibold text-slate-800">Field definitions and node overrides</h3>
+                <p className="text-xs text-slate-500">Create family-wide fields, then optionally override labels/visibility for the selected node.</p>
               </div>
-              {selectedNode && <span className="text-xs text-slate-500">{fields.length} fields</span>}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">{fields.length} active fields</span>
+                <button onClick={startCreateField} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                  New field
+                </button>
+              </div>
             </div>
-            <div className="mt-4 space-y-2">
-              {selectedNode && fields.length > 0 ? (
-                fields.slice(0, 12).map((field) => (
-                  <div key={field.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
+
+            <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+              <div className="space-y-2">
+                {fields.length > 0 ? (
+                  fields.map((field) => {
+                    const selectedForEdit = editingFieldId === field.id;
+                    const overrideApplied = hasNodeOverride(field, selectedNode?.id);
+
+                    return (
+                      <div key={field.id} className={`rounded-xl border px-4 py-3 text-sm ${selectedForEdit ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white"}`}>
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="font-medium">{field.effective_label}</p>
+                              {overrideApplied && <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${selectedForEdit ? "bg-white/15 text-white" : "bg-blue-100 text-blue-700"}`}>Node override</span>}
+                              {field.is_system && <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${selectedForEdit ? "bg-white/15 text-white" : "bg-amber-100 text-amber-800"}`}>System</span>}
+                            </div>
+                            <p className={`mt-1 text-xs ${selectedForEdit ? "text-white/75" : "text-slate-500"}`}>{field.field_key} • {field.storage_kind} • default order {field.display_order_default}</p>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-semibold uppercase">
+                              <span className={`rounded px-2 py-1 ${selectedForEdit ? "bg-white/15 text-white" : field.effective_grid_visible ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>Grid</span>
+                              <span className={`rounded px-2 py-1 ${selectedForEdit ? "bg-white/15 text-white" : field.effective_intake_visible ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>Intake</span>
+                              <span className={`rounded px-2 py-1 ${selectedForEdit ? "bg-white/15 text-white" : field.effective_detail_visible ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>Detail</span>
+                              <span className={`rounded px-2 py-1 ${selectedForEdit ? "bg-white/15 text-white" : field.effective_required ? "bg-amber-100 text-amber-800" : "bg-slate-50 text-slate-400"}`}>Required</span>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button onClick={() => startEditField(field)} className={`rounded-lg border px-3 py-2 text-xs font-medium ${selectedForEdit ? "border-white/30 text-white hover:bg-white/10" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}>
+                              {selectedForEdit ? "Editing" : "Edit"}
+                            </button>
+                            {overrideApplied && selectedNode && (
+                              <button onClick={() => handleResetOverride(field)} disabled={saving} className={`rounded-lg border px-3 py-2 text-xs font-medium ${selectedForEdit ? "border-white/30 text-white hover:bg-white/10" : "border-blue-300 text-blue-700 hover:bg-blue-50"}`}>
+                                Reset override
+                              </button>
+                            )}
+                            {!field.is_system && field.storage_kind !== "core_column" && (
+                              <button onClick={() => openDeleteFieldModal(field)} disabled={saving} className={`rounded-lg border px-3 py-2 text-xs font-medium ${selectedForEdit ? "border-rose-300 text-white hover:bg-white/10" : "border-rose-300 text-rose-700 hover:bg-rose-50"}`}>
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+                    No field metadata exists for this family yet. Create the first field to define grid/intake/detail behavior.
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="font-medium text-slate-800">{field.effective_label}</p>
-                      <p className="text-xs text-slate-500">{field.field_key} • {field.storage_kind}</p>
+                      <h4 className="text-sm font-semibold text-slate-900">{editingField ? `Edit ${editingField.default_label}` : "Create field definition"}</h4>
+                      <p className="mt-1 text-xs text-slate-500">Definitions apply to the whole {family} family unless a node override is added below.</p>
                     </div>
-                    <div className="flex gap-2 text-[10px] font-semibold uppercase">
-                      <span className={`rounded px-2 py-1 ${field.effective_grid_visible ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>Grid</span>
-                      <span className={`rounded px-2 py-1 ${field.effective_intake_visible ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>Intake</span>
-                      <span className={`rounded px-2 py-1 ${field.effective_required ? "bg-amber-100 text-amber-800" : "bg-slate-50 text-slate-400"}`}>Required</span>
+                    {editingField && (
+                      <button onClick={startCreateField} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white">
+                        Clear form
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Field key</label>
+                      <input value={fieldKeyInput} onChange={(event) => setFieldKeyInput(event.target.value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, ""))} disabled={saving || Boolean(editingField?.is_system)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100" placeholder="listing_status" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Default label</label>
+                      <input value={fieldLabelInput} onChange={(event) => setFieldLabelInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Listing status" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Data type</label>
+                      <select value={fieldTypeInput} onChange={(event) => setFieldTypeInput(event.target.value as FieldDataType)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                        {FIELD_TYPE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Storage</label>
+                      <select value={fieldStorageInput} onChange={(event) => setFieldStorageInput(event.target.value as FieldStorageKind)} disabled={saving || Boolean(editingField?.is_system)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100">
+                        {FIELD_STORAGE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
+                      <textarea value={fieldDescriptionInput} onChange={(event) => setFieldDescriptionInput(event.target.value)} disabled={saving} className="min-h-[84px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Explain where this field is used." />
+                    </div>
+                    {fieldStorageInput === "core_column" && (
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Core column name</label>
+                        <input value={fieldCoreColumnInput} onChange={(event) => setFieldCoreColumnInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="price" />
+                      </div>
+                    )}
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Default order</label>
+                      <input type="number" value={fieldDisplayOrderInput} onChange={(event) => setFieldDisplayOrderInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    </div>
+                    <div className="md:col-span-2 grid gap-2 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700 sm:grid-cols-2">
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldVisibleInput} onChange={(event) => setFieldVisibleInput(event.target.checked)} /> Visible by default</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldRequiredInput} onChange={(event) => setFieldRequiredInput(event.target.checked)} /> Required by default</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldGridVisibleInput} onChange={(event) => setFieldGridVisibleInput(event.target.checked)} /> Show in grid</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldIntakeVisibleInput} onChange={(event) => setFieldIntakeVisibleInput(event.target.checked)} /> Show in intake</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldDetailVisibleInput} onChange={(event) => setFieldDetailVisibleInput(event.target.checked)} /> Show in detail</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={fieldFilterableInput} onChange={(event) => setFieldFilterableInput(event.target.checked)} /> Filterable</label>
+                      <label className="flex items-center gap-2 sm:col-span-2"><input type="checkbox" checked={fieldSortableInput} onChange={(event) => setFieldSortableInput(event.target.checked)} /> Sortable</label>
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Options JSON</label>
+                      <textarea value={fieldOptionsInput} onChange={(event) => setFieldOptionsInput(event.target.value)} disabled={saving} className="min-h-[96px] w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs" />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Validation JSON</label>
+                      <textarea value={fieldValidationInput} onChange={(event) => setFieldValidationInput(event.target.value)} disabled={saving} className="min-h-[96px] w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs" />
                     </div>
                   </div>
-                ))
-              ) : (
-                <p className="text-sm text-slate-500">{selectedNode ? "No field metadata found for this node/family yet." : "Select a node to preview its effective fields."}</p>
-              )}
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button onClick={handleSaveFieldDefinition} disabled={saving || !fieldKeyInput.trim() || !fieldLabelInput.trim()} className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40">
+                      {editingField ? "Save field definition" : "Create field definition"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <div>
+                    <h4 className="text-sm font-semibold text-slate-900">Node override</h4>
+                    <p className="mt-1 text-xs text-slate-500">Select a field above to override its label or visibility for the currently selected node.</p>
+                  </div>
+
+                  {!selectedNode ? (
+                    <p className="mt-4 text-sm text-slate-500">Select a node to manage per-node overrides.</p>
+                  ) : !editingField ? (
+                    <p className="mt-4 text-sm text-slate-500">Choose a field from the list first.</p>
+                  ) : (
+                    <div className="mt-4 grid gap-3">
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Override label</label>
+                        <input value={overrideLabelInput} onChange={(event) => setOverrideLabelInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder={editingField.default_label} />
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Override order</label>
+                          <input type="number" value={overrideDisplayOrderInput} onChange={(event) => setOverrideDisplayOrderInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder={String(editingField.display_order_default)} />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Width (px)</label>
+                          <input type="number" value={overrideWidthInput} onChange={(event) => setOverrideWidthInput(event.target.value)} disabled={saving} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Optional" />
+                        </div>
+                      </div>
+                      <div className="grid gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 sm:grid-cols-2">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideVisibleInput} onChange={(event) => setOverrideVisibleInput(event.target.checked)} /> Visible</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideRequiredInput} onChange={(event) => setOverrideRequiredInput(event.target.checked)} /> Required</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideGridVisibleInput} onChange={(event) => setOverrideGridVisibleInput(event.target.checked)} /> Grid visible</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideIntakeVisibleInput} onChange={(event) => setOverrideIntakeVisibleInput(event.target.checked)} /> Intake visible</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideDetailVisibleInput} onChange={(event) => setOverrideDetailVisibleInput(event.target.checked)} /> Detail visible</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={overrideFilterableInput} onChange={(event) => setOverrideFilterableInput(event.target.checked)} /> Filterable</label>
+                        <label className="flex items-center gap-2 sm:col-span-2"><input type="checkbox" checked={overrideSortableInput} onChange={(event) => setOverrideSortableInput(event.target.checked)} /> Sortable</label>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button onClick={handleSaveFieldOverride} disabled={saving} className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40">
+                          Save node override
+                        </button>
+                        {hasNodeOverride(editingField, selectedNode.id) && (
+                          <button onClick={() => handleResetOverride(editingField)} disabled={saving} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                            Reset override
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </section>
     </section>
+      <ConfirmationModal
+        open={deleteNodeOpen && Boolean(selectedNode)}
+        title={`Delete ${selectedNode?.name || "node"}?`}
+        description="This permanently deletes the hierarchy node. Deletion is blocked if the node still has child nodes, linked records, or linked media."
+        impacts={[
+          `Child nodes: ${nodeDetails?.usage.child_nodes || 0}`,
+          `Linked records: ${nodeDetails?.usage.linked_records || 0}`,
+          `Linked media: ${nodeDetails?.usage.linked_media || 0}`
+        ]}
+        confirmLabel="Delete node"
+        confirming={saving}
+        onClose={() => setDeleteNodeOpen(false)}
+        onConfirm={async () => {
+          setDeleteNodeOpen(false);
+          await handleDelete();
+        }}
+      />
+      <ConfirmationModal
+        open={Boolean(deleteFieldTarget)}
+        title={`Delete ${deleteFieldTarget?.default_label || "field"}?`}
+        description="This permanently deletes the field definition and cascades to its stored custom values and node overrides."
+        impacts={
+          deleteFieldLoading
+            ? ["Loading field delete impact…"]
+            : [
+                `Stored custom values: ${deleteFieldImpact?.custom_value_count || 0}`,
+                `Node overrides: ${deleteFieldImpact?.override_count || 0}`,
+                deleteFieldImpact?.hard_delete_allowed === false
+                  ? "This field is system/core-backed and cannot be hard deleted."
+                  : "Hard delete is allowed for this field."
+              ]
+        }
+        confirmLabel="Delete field"
+        confirming={saving}
+        onClose={() => {
+          setDeleteFieldTarget(null);
+          setDeleteFieldImpact(null);
+        }}
+        onConfirm={async () => {
+          if (!deleteFieldTarget || deleteFieldLoading || deleteFieldImpact?.hard_delete_allowed === false) return;
+          await handleDeleteField(deleteFieldTarget);
+        }}
+      />
+    </>
   );
 }
