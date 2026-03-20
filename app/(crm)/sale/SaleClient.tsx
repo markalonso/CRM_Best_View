@@ -9,6 +9,8 @@ export default function SaleClient() {
       <FamilyHierarchyBrowser
         family="sale"
         title="Sale"
+        activeOnly
+        recordContainerOnly
         description="Browse sale records by hierarchy layers while keeping the existing grid, search, filters, and export tools available."
       />
       <CRMGrid type="sale" />

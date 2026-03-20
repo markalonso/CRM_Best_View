@@ -9,6 +9,7 @@ export default function BuyersClient() {
       <FamilyHierarchyBrowser
         family="buyers"
         title="Buyers"
+        activeOnly
         description="Browse buyer records by hierarchy layers while keeping the existing grid, search, filters, and export tools available."
       />
       <CRMGrid type="buyer" />

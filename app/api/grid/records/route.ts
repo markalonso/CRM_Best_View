@@ -137,7 +137,7 @@ async function resolveHierarchyRecordIds(supabase: ReturnType<typeof createSupab
 
   const { data: node, error: nodeError } = await supabase
     .from("hierarchy_nodes")
-    .select("id,family")
+    .select("id,family,is_active,is_root,can_contain_records,allow_record_assignment")
     .eq("id", nodeId)
     .single();
 
@@ -146,6 +146,9 @@ async function resolveHierarchyRecordIds(supabase: ReturnType<typeof createSupab
   }
   if (String(node.family) !== family) {
     throw new Error(`Hierarchy node family ${String(node.family)} does not match grid type ${type}`);
+  }
+  if (!node.is_active || node.is_root || !node.can_contain_records || !node.allow_record_assignment) {
+    return [];
   }
 
   const { data: closureRows, error: closureError } = await supabase

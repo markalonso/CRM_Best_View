@@ -1,10 +1,13 @@
 import "server-only";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseClient } from "@/services/supabase/client";
 import type {
   CRMRecordFamily,
   EffectiveFieldDefinition,
   FieldDefinition,
   HierarchyFieldOverride,
+  HierarchyNodeDetails,
+  HierarchyNodeUsageCounts,
   HierarchyNode,
   HierarchyTreeNode,
   ReviewHierarchyType
@@ -43,11 +46,66 @@ function normalizeNode(row: Record<string, unknown>): HierarchyNode {
     depth: Number(row.depth || 0),
     sort_order: Number(row.sort_order || 0),
     allow_record_assignment: Boolean(row.allow_record_assignment),
+    can_have_children: row.can_have_children === undefined ? true : Boolean(row.can_have_children),
+    can_contain_records: row.can_contain_records === undefined ? Boolean(row.allow_record_assignment) : Boolean(row.can_contain_records),
+    is_root: Boolean(row.is_root),
     is_active: Boolean(row.is_active),
+    archived_at: row.archived_at ? String(row.archived_at) : null,
     metadata: (row.metadata || {}) as Record<string, unknown>,
     created_by: row.created_by ? String(row.created_by) : null,
     created_at: String(row.created_at || ""),
     updated_at: String(row.updated_at || "")
+  };
+}
+
+function rootNameByFamily(family: HierarchyNode["family"]) {
+  if (family === "sale") return "Sale";
+  if (family === "rent") return "Rent";
+  if (family === "buyers") return "Buyers";
+  if (family === "clients") return "Clients";
+  return "Media";
+}
+
+function buildHierarchyNodeBehavior(input: {
+  mutationMode?: "folder" | "record" | "hybrid";
+  allowRecordAssignment?: boolean;
+  canHaveChildren?: boolean;
+  canContainRecords?: boolean;
+}) {
+  const canContainRecords = input.canContainRecords ?? input.allowRecordAssignment ?? (input.mutationMode === "record" || input.mutationMode === "hybrid");
+  const canHaveChildren = input.canHaveChildren ?? (input.mutationMode === "record" ? false : true);
+
+  if (!canHaveChildren && !canContainRecords) {
+    throw new Error("Hierarchy nodes must allow children, records, or both");
+  }
+
+  return {
+    canHaveChildren,
+    canContainRecords,
+    allowRecordAssignment: canContainRecords
+  };
+}
+
+async function getNodeUsageCounts(nodeId: string): Promise<HierarchyNodeUsageCounts> {
+  const supabase = createSupabaseAdminClient();
+  const [
+    childNodesResult,
+    recordLinksResult,
+    mediaLinksResult
+  ] = await Promise.all([
+    supabase.from("hierarchy_nodes").select("id", { count: "exact", head: true }).eq("parent_id", nodeId),
+    supabase.from("record_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId),
+    supabase.from("media_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId)
+  ]);
+
+  if (childNodesResult.error) throw new Error(childNodesResult.error.message);
+  if (recordLinksResult.error) throw new Error(recordLinksResult.error.message);
+  if (mediaLinksResult.error) throw new Error(mediaLinksResult.error.message);
+
+  return {
+    child_nodes: childNodesResult.count || 0,
+    linked_records: recordLinksResult.count || 0,
+    linked_media: mediaLinksResult.count || 0
   };
 }
 
@@ -127,8 +185,8 @@ function buildTree(nodes: HierarchyNode[]): HierarchyTreeNode[] {
   return roots;
 }
 
-async function getNodeOrThrow(nodeId: string) {
-  const supabase = createSupabaseClient();
+async function getNodeOrThrow(nodeId: string, options?: { admin?: boolean }) {
+  const supabase = options?.admin ? createSupabaseAdminClient() : createSupabaseClient();
   const { data, error } = await supabase.from("hierarchy_nodes").select("*").eq("id", nodeId).single();
   if (error || !data) throw new Error(error?.message || "Hierarchy node not found");
   return normalizeNode((data || {}) as Record<string, unknown>);
@@ -161,6 +219,92 @@ export async function fetchHierarchyTree(family: HierarchyNode["family"]) {
   return { nodes, tree: buildTree(nodes) };
 }
 
+export async function ensureHierarchyFamilyRoot(input: {
+  family: HierarchyNode["family"];
+  actorUserId?: string | null;
+}) {
+  const supabase = createSupabaseAdminClient();
+  const { data: existing, error: existingError } = await supabase
+    .from("hierarchy_nodes")
+    .select("*")
+    .eq("family", input.family)
+    .eq("is_root", true)
+    .maybeSingle();
+
+  if (existingError) throw new Error(existingError.message);
+  if (existing) return normalizeNode(existing as Record<string, unknown>);
+
+  const payload = {
+    family: input.family,
+    parent_id: null,
+    node_kind: "root",
+    node_key: input.family,
+    name: rootNameByFamily(input.family),
+    sort_order: 0,
+    can_have_children: true,
+    can_contain_records: false,
+    allow_record_assignment: false,
+    is_root: true,
+    is_active: true,
+    metadata: {},
+    created_by: input.actorUserId || null
+  };
+
+  const { data, error } = await supabase.from("hierarchy_nodes").insert(payload).select("*").single();
+  if (error || !data) throw new Error(error?.message || "Failed to create hierarchy root");
+  return normalizeNode(data as Record<string, unknown>);
+}
+
+export async function fetchHierarchyNodeDetails(nodeId: string): Promise<HierarchyNodeDetails> {
+  const supabase = createSupabaseClient();
+  const node = await getNodeOrThrow(nodeId);
+  const usage = await getNodeUsageCounts(nodeId);
+
+  let parent: HierarchyNode | null = null;
+  if (node.parent_id) {
+    const { data: parentRow, error: parentError } = await supabase.from("hierarchy_nodes").select("*").eq("id", node.parent_id).maybeSingle();
+    if (parentError) throw new Error(parentError.message);
+    parent = parentRow ? normalizeNode(parentRow as Record<string, unknown>) : null;
+  }
+
+  return { node, parent, usage };
+}
+
+export async function fetchAllowedHierarchyDestinationNodes(family: CRMRecordFamily) {
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase
+    .from("hierarchy_nodes")
+    .select("*")
+    .eq("family", family)
+    .eq("is_active", true)
+    .eq("is_root", false)
+    .eq("can_contain_records", true)
+    .eq("allow_record_assignment", true)
+    .order("depth", { ascending: true })
+    .order("sort_order", { ascending: true })
+    .order("name", { ascending: true });
+
+  if (error) throw new Error(error.message);
+  return (data || []).map((row) => normalizeNode(row as Record<string, unknown>));
+}
+
+export async function assertValidRecordHierarchyDestination(input: { family: CRMRecordFamily; nodeId: string }) {
+  const existingNode = await getNodeOrThrow(input.nodeId, { admin: true });
+  if (existingNode.family !== input.family) {
+    throw new Error(`Node family ${existingNode.family} does not match record family ${input.family}`);
+  }
+  if (existingNode.is_root) {
+    throw new Error("Business records cannot be assigned directly to a family root node");
+  }
+  if (!existingNode.is_active) {
+    throw new Error("Selected hierarchy destination is archived. Choose an active destination node.");
+  }
+  if (!existingNode.can_contain_records || !existingNode.allow_record_assignment) {
+    throw new Error("Selected hierarchy destination is container-only. Choose an active record destination node.");
+  }
+  return existingNode;
+}
+
 export async function createHierarchyNode(input: {
   family: HierarchyNode["family"];
   parentId?: string | null;
@@ -169,11 +313,44 @@ export async function createHierarchyNode(input: {
   name: string;
   sortOrder?: number;
   allowRecordAssignment?: boolean;
+  mutationMode?: "folder" | "record" | "hybrid";
+  canHaveChildren?: boolean;
+  canContainRecords?: boolean;
   isActive?: boolean;
   metadata?: Record<string, unknown>;
   actorUserId?: string | null;
 }) {
-  const supabase = createSupabaseClient();
+  if (!input.parentId) {
+    throw new Error("Child node creation requires a parentId. Seed the family root first if it is missing.");
+  }
+
+  const supabase = createSupabaseAdminClient();
+  const parent = await getNodeOrThrow(input.parentId, { admin: true });
+  if (parent.family !== input.family) {
+    throw new Error(`Parent family ${parent.family} does not match requested family ${input.family}`);
+  }
+  if (!parent.is_active) {
+    throw new Error("Selected parent node is archived. Choose an active parent branch.");
+  }
+  if (!parent.can_have_children) {
+    throw new Error("Selected parent node cannot contain child nodes");
+  }
+
+  if (input.nodeKind === "root") {
+    throw new Error("Child nodes cannot use the root kind");
+  }
+
+  const behavior = buildHierarchyNodeBehavior({
+    mutationMode: input.mutationMode,
+    allowRecordAssignment: input.allowRecordAssignment,
+    canHaveChildren: input.canHaveChildren,
+    canContainRecords: input.canContainRecords
+  });
+
+  if (input.family === "media" && behavior.canContainRecords) {
+    throw new Error("Media hierarchy nodes are navigation/media containers only and cannot receive business records");
+  }
+
   const payload = {
     family: input.family,
     parent_id: input.parentId || null,
@@ -181,7 +358,9 @@ export async function createHierarchyNode(input: {
     node_key: input.nodeKey,
     name: input.name,
     sort_order: input.sortOrder ?? 0,
-    allow_record_assignment: input.allowRecordAssignment ?? true,
+    allow_record_assignment: behavior.allowRecordAssignment,
+    can_have_children: behavior.canHaveChildren,
+    can_contain_records: behavior.canContainRecords,
     is_active: input.isActive ?? true,
     metadata: input.metadata || {},
     created_by: input.actorUserId || null
@@ -192,70 +371,140 @@ export async function createHierarchyNode(input: {
   return normalizeNode((data || {}) as Record<string, unknown>);
 }
 
+export async function createHierarchyDestinationNode(input: {
+  family: CRMRecordFamily;
+  parentId: string;
+  nodeKind: Exclude<HierarchyNode["node_kind"], "root">;
+  nodeKey: string;
+  name: string;
+  sortOrder?: number;
+  creationMode?: "record" | "hybrid";
+  metadata?: Record<string, unknown>;
+  actorUserId?: string | null;
+}) {
+  const creationMode = input.creationMode || "record";
+  return createHierarchyNode({
+    family: input.family,
+    parentId: input.parentId,
+    nodeKind: input.nodeKind,
+    nodeKey: input.nodeKey,
+    name: input.name,
+    sortOrder: input.sortOrder,
+    allowRecordAssignment: true,
+    mutationMode: creationMode,
+    canHaveChildren: creationMode === "hybrid",
+    canContainRecords: true,
+    isActive: true,
+    metadata: input.metadata,
+    actorUserId: input.actorUserId
+  });
+}
+
 export async function updateHierarchyNode(nodeId: string, input: {
   nodeKind?: HierarchyNode["node_kind"];
   nodeKey?: string;
   name?: string;
   sortOrder?: number;
   allowRecordAssignment?: boolean;
+  mutationMode?: "folder" | "record" | "hybrid";
+  canHaveChildren?: boolean;
+  canContainRecords?: boolean;
   isActive?: boolean;
   metadata?: Record<string, unknown>;
 }) {
-  const supabase = createSupabaseClient();
+  const supabase = createSupabaseAdminClient();
+  const existingNode = await getNodeOrThrow(nodeId, { admin: true });
+  const usage = await getNodeUsageCounts(nodeId);
+
+  if (existingNode.is_root && (input.isActive === false || input.nodeKind || input.nodeKey || input.allowRecordAssignment !== undefined || input.canContainRecords !== undefined || input.canHaveChildren !== undefined || input.mutationMode)) {
+    throw new Error("Root hierarchy nodes are navigation-only and cannot be archived or reconfigured");
+  }
+  if (input.isActive !== undefined && input.isActive !== existingNode.is_active) {
+    throw new Error("Use the archive/restore action for hierarchy activation changes");
+  }
+  if (input.nodeKind === "root") {
+    throw new Error("Child nodes cannot be converted into root nodes");
+  }
+
   const updatePayload: Record<string, unknown> = {};
   if (input.nodeKind !== undefined) updatePayload.node_kind = input.nodeKind;
   if (input.nodeKey !== undefined) updatePayload.node_key = input.nodeKey;
   if (input.name !== undefined) updatePayload.name = input.name;
   if (input.sortOrder !== undefined) updatePayload.sort_order = input.sortOrder;
-  if (input.allowRecordAssignment !== undefined) updatePayload.allow_record_assignment = input.allowRecordAssignment;
-  if (input.isActive !== undefined) updatePayload.is_active = input.isActive;
   if (input.metadata !== undefined) updatePayload.metadata = input.metadata;
+
+  if (input.allowRecordAssignment !== undefined || input.mutationMode !== undefined || input.canHaveChildren !== undefined || input.canContainRecords !== undefined) {
+    const behavior = buildHierarchyNodeBehavior({
+      mutationMode: input.mutationMode,
+      allowRecordAssignment: input.allowRecordAssignment ?? existingNode.allow_record_assignment,
+      canHaveChildren: input.canHaveChildren,
+      canContainRecords: input.canContainRecords
+    });
+
+    if (existingNode.family === "media" && behavior.canContainRecords) {
+      throw new Error("Media hierarchy nodes are navigation/media containers only and cannot receive business records");
+    }
+    if (!behavior.canHaveChildren && usage.child_nodes > 0) {
+      throw new Error("Cannot disable child folders while this node still has child nodes");
+    }
+    if (!behavior.canContainRecords && usage.linked_records > 0) {
+      throw new Error("Cannot make this node folder-only while business records are still linked to it");
+    }
+
+    updatePayload.allow_record_assignment = behavior.allowRecordAssignment;
+    updatePayload.can_have_children = behavior.canHaveChildren;
+    updatePayload.can_contain_records = behavior.canContainRecords;
+  }
 
   const { data, error } = await supabase.from("hierarchy_nodes").update(updatePayload).eq("id", nodeId).select("*").single();
   if (error || !data) throw new Error(error?.message || "Failed to update hierarchy node");
   return normalizeNode((data || {}) as Record<string, unknown>);
 }
 
+export async function archiveHierarchyNode(nodeId: string, archived: boolean) {
+  const supabase = createSupabaseAdminClient();
+  const node = await getNodeOrThrow(nodeId, { admin: true });
+  if (node.is_root) {
+    throw new Error("Root nodes cannot be archived");
+  }
+
+  if (archived) {
+    const usage = await getNodeUsageCounts(nodeId);
+    if (usage.child_nodes > 0 || usage.linked_records > 0 || usage.linked_media > 0) {
+      throw new Error("Archive is only allowed for empty nodes. Remove child nodes, linked records, and linked media first.");
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("hierarchy_nodes")
+    .update({
+      is_active: !archived,
+      archived_at: archived ? new Date().toISOString() : null
+    })
+    .eq("id", nodeId)
+    .select("*")
+    .single();
+
+  if (error || !data) throw new Error(error?.message || "Failed to update archive state");
+  return normalizeNode(data as Record<string, unknown>);
+}
+
 export async function deleteHierarchyNode(nodeId: string) {
-  const supabase = createSupabaseClient();
-  const node = await getNodeOrThrow(nodeId);
-  if (node.depth === 0 || node.node_kind === "root") {
+  const supabase = createSupabaseAdminClient();
+  const node = await getNodeOrThrow(nodeId, { admin: true });
+  if (node.depth === 0 || node.node_kind === "root" || node.is_root) {
     throw new Error("Root nodes cannot be deleted");
   }
 
-  const [
-    childNodesResult,
-    saleLinksResult,
-    rentLinksResult,
-    buyerLinksResult,
-    clientLinksResult,
-    mediaLinksResult
-  ] = await Promise.all([
-    supabase.from("hierarchy_nodes").select("id", { count: "exact", head: true }).eq("parent_id", nodeId),
-    supabase.from("record_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId).not("sale_id", "is", null),
-    supabase.from("record_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId).not("rent_id", "is", null),
-    supabase.from("record_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId).not("buyer_id", "is", null),
-    supabase.from("record_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId).not("client_id", "is", null),
-    supabase.from("media_hierarchy_links").select("id", { count: "exact", head: true }).eq("node_id", nodeId)
-  ]);
-
-  const counts = {
-    childNodes: childNodesResult.count || 0,
-    saleRecords: saleLinksResult.count || 0,
-    rentRecords: rentLinksResult.count || 0,
-    buyerRecords: buyerLinksResult.count || 0,
-    clientRecords: clientLinksResult.count || 0,
-    mediaItems: mediaLinksResult.count || 0
-  };
-
-  const isEmpty = Object.values(counts).every((value) => value === 0);
+  const usage = await getNodeUsageCounts(nodeId);
+  const isEmpty = Object.values(usage).every((value) => value === 0);
   if (!isEmpty) {
-    throw new Error(`Node is not empty and cannot be deleted. Usage: ${JSON.stringify(counts)}`);
+    throw new Error(`Node is not empty and cannot be deleted. Usage: ${JSON.stringify(usage)}`);
   }
 
   const { error } = await supabase.from("hierarchy_nodes").delete().eq("id", nodeId);
   if (error) throw new Error(error.message);
-  return { deletedNodeId: nodeId, counts };
+  return { deletedNodeId: nodeId, counts: usage };
 }
 
 export async function moveHierarchyNode(nodeId: string, newParentId: string | null) {
@@ -643,17 +892,8 @@ export async function assignRecordToHierarchyNode(input: {
   nodeId: string;
   actorUserId?: string | null;
 }) {
-  const supabase = createSupabaseClient();
-  const existingNode = await getNodeOrThrow(input.nodeId);
-  if (existingNode.family !== input.family) {
-    throw new Error(`Node family ${existingNode.family} does not match record family ${input.family}`);
-  }
-  if (!existingNode.is_active) {
-    throw new Error("Cannot assign records to an archived hierarchy node");
-  }
-  if (!existingNode.allow_record_assignment) {
-    throw new Error("Selected hierarchy node is a container only and cannot receive records");
-  }
+  const supabase = createSupabaseAdminClient();
+  await assertValidRecordHierarchyDestination({ family: input.family, nodeId: input.nodeId });
 
   const linkColumn = recordLinkColumnByFamily[input.family];
   const { data: existingLink, error: existingError } = await supabase
@@ -679,8 +919,8 @@ export async function assignRecordToHierarchyNode(input: {
 }
 
 export async function assignMediaToHierarchyNode(input: { mediaId: string; nodeId: string; actorUserId?: string | null }) {
-  const supabase = createSupabaseClient();
-  const existingNode = await getNodeOrThrow(input.nodeId);
+  const supabase = createSupabaseAdminClient();
+  const existingNode = await getNodeOrThrow(input.nodeId, { admin: true });
   if (!existingNode.is_active) {
     throw new Error("Cannot assign media to an archived hierarchy node");
   }
