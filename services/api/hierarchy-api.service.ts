@@ -132,6 +132,7 @@ export async function saveFieldDefinitionApi(input: {
   displayOrderDefault?: number;
   optionsJson?: Record<string, unknown>;
   validationJson?: Record<string, unknown>;
+  scopeMode?: "family" | "selected_node";
   override?: {
     nodeId: string;
     overrideLabel?: string | null;
@@ -190,6 +191,13 @@ export async function deleteMediaItemApi(mediaId: string) {
       intake_session_id: string | null;
     };
     storageWarnings: string[];
+    storageCleanup: {
+      attemptedObjectCount: number;
+      deletedObjectCount: number;
+      queuedObjectCount: number;
+      warningCount: number;
+      warnings: string[];
+    };
   }>(response);
 }
 

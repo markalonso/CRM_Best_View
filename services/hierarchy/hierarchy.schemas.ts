@@ -140,6 +140,7 @@ export const saveFieldDefinitionSchema = z.object({
   displayOrderDefault: z.number().int().min(0).max(100000).optional().default(100),
   optionsJson: jsonRecordSchema.optional().default({}),
   validationJson: jsonRecordSchema.optional().default({}),
+  scopeMode: z.enum(["family", "selected_node"]).optional().default("family"),
   override: fieldOverrideInputSchema.optional()
 }).superRefine((value, ctx) => {
   if (value.storageKind === "core_column" && !value.coreColumnName) {
@@ -147,6 +148,29 @@ export const saveFieldDefinitionSchema = z.object({
   }
   if (value.storageKind === "custom_value" && value.coreColumnName) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["coreColumnName"], message: "coreColumnName must be omitted for custom_value fields" });
+  }
+  if (!value.id && value.storageKind === "core_column") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["storageKind"],
+      message: "Creating new core_column fields from Hierarchy Manager is disabled. Create a custom value field instead."
+    });
+  }
+  if (value.scopeMode === "selected_node") {
+    if (!value.override?.nodeId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["override", "nodeId"],
+        message: "A selected-node field requires a nodeId override target."
+      });
+    }
+    if (value.storageKind !== "custom_value") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["storageKind"],
+        message: "Selected-node fields must use custom_value storage."
+      });
+    }
   }
 });
 

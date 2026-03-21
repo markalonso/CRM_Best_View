@@ -51,6 +51,7 @@ export async function POST(request: NextRequest) {
       displayOrderDefault: payload.displayOrderDefault,
       optionsJson: payload.optionsJson,
       validationJson: payload.validationJson,
+      scopeMode: payload.scopeMode,
       override: payload.override
         ? {
             nodeId: payload.override.nodeId,
