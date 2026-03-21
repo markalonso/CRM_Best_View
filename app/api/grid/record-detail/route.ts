@@ -29,14 +29,35 @@ const hierarchyFamilyByType: Record<GridType, "sale" | "rent" | "buyers" | "clie
   client: "clients"
 };
 
+const recordLinkColumnByType: Record<GridType, "sale_id" | "rent_id" | "buyer_id" | "client_id"> = {
+  sale: "sale_id",
+  rent: "rent_id",
+  buyer: "buyer_id",
+  client: "client_id"
+};
+
+async function resolveEffectiveNodeId(supabase: ReturnType<typeof createSupabaseClient>, type: GridType, recordId: string, requestedNodeId?: string) {
+  const directNodeId = String(requestedNodeId || "").trim();
+  if (directNodeId) return directNodeId;
+
+  const linkColumn = recordLinkColumnByType[type];
+  const { data: link } = await supabase
+    .from("record_hierarchy_links")
+    .select("node_id")
+    .eq(linkColumn, recordId)
+    .maybeSingle();
+
+  return String(link?.node_id || "");
+}
+
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get("type") || "sale") as GridType;
   const id = searchParams.get("id") || "";
-  const hierarchyNodeId = String(searchParams.get("nodeId") || "").trim();
 
   if (!map[type] || !id) return NextResponse.json({ error: "Invalid params" }, { status: 400 });
+  const hierarchyNodeId = await resolveEffectiveNodeId(supabase, type, id, searchParams.get("nodeId") || "");
 
   const { data: record, error } = await supabase.from(map[type].table).select("*").eq("id", id).single();
   if (error || !record) return NextResponse.json({ error: error?.message || "Record not found" }, { status: 404 });
