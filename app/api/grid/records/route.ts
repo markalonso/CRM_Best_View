@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { getRequestActor, hasRole } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from "@/services/hierarchy/hierarchy.service";
+import { deleteRecords } from "@/services/records/record-delete.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
 
@@ -440,4 +442,33 @@ export async function PATCH(request: NextRequest) {
   });
 
   return NextResponse.json({ ok: true, normalized: value });
+}
+
+export async function DELETE(request: NextRequest) {
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!hasRole(actor.role, "admin")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  try {
+    const payload = z.object({
+      type: z.enum(["sale", "rent", "buyer", "client"]),
+      recordIds: z.array(z.string().uuid()).min(1).max(200)
+    }).parse(await request.json());
+
+    const result = await deleteRecords({
+      type: payload.type,
+      recordIds: payload.recordIds
+    });
+
+    return NextResponse.json({ ok: true, ...result });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid delete payload", issues: error.issues }, { status: 400 });
+    }
+    const message = error instanceof Error ? error.message : "Unknown error";
+    if (message.toLowerCase().includes("no matching records")) {
+      return NextResponse.json({ error: message }, { status: 404 });
+    }
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
