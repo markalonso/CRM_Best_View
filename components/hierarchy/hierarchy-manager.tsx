@@ -21,6 +21,7 @@ import {
 import type { EffectiveFieldDefinition, FieldDataType, FieldStorageKind, HierarchyNode, HierarchyNodeDetails, HierarchyTreeNode } from "@/types/hierarchy";
 
 type NodeMutationMode = "folder" | "record" | "hybrid";
+type FieldScopeMode = "family" | "selected_node";
 
 const FAMILY_OPTIONS: Array<{ id: HierarchyFamily; label: string }> = [
   { id: "sale", label: "Sale" },
@@ -61,6 +62,11 @@ const FIELD_TYPE_OPTIONS: Array<{ value: FieldDataType; label: string }> = [
 const FIELD_STORAGE_OPTIONS: Array<{ value: FieldStorageKind; label: string }> = [
   { value: "custom_value", label: "Custom value" },
   { value: "core_column", label: "Core column" }
+];
+
+const FIELD_SCOPE_OPTIONS: Array<{ value: FieldScopeMode; label: string; description: string }> = [
+  { value: "selected_node", label: "Selected node only", description: "Create a dynamic custom field that is only visible for the selected hierarchy branch." },
+  { value: "family", label: "Whole family", description: "Create a family-level field definition that can be refined with node overrides later." }
 ];
 
 function flattenTree(nodes: HierarchyTreeNode[]): HierarchyNode[] {
@@ -195,6 +201,7 @@ export function HierarchyManager() {
   const [fieldLabelInput, setFieldLabelInput] = useState("");
   const [fieldDescriptionInput, setFieldDescriptionInput] = useState("");
   const [fieldTypeInput, setFieldTypeInput] = useState<FieldDataType>("text");
+  const [fieldScopeInput, setFieldScopeInput] = useState<FieldScopeMode>("family");
   const [fieldStorageInput, setFieldStorageInput] = useState<FieldStorageKind>("custom_value");
   const [fieldCoreColumnInput, setFieldCoreColumnInput] = useState("");
   const [fieldDisplayOrderInput, setFieldDisplayOrderInput] = useState("100");
@@ -225,6 +232,9 @@ export function HierarchyManager() {
   const selectedAssignable = Boolean(selectedNode && selectedNode.allow_record_assignment && selectedNode.is_active && !selectedNode.is_root);
   const availableChildModes = family === "media" ? CHILD_MODE_OPTIONS.filter((option) => option.value === "folder") : CHILD_MODE_OPTIONS;
   const editingField = fields.find((field) => field.id === editingFieldId) || null;
+  const availableFieldStorageOptions = editingField
+    ? FIELD_STORAGE_OPTIONS.filter((option) => option.value === editingField.storage_kind)
+    : FIELD_STORAGE_OPTIONS.filter((option) => option.value === "custom_value");
 
   async function loadTree(nextFamily = family, preferredNodeId?: string) {
     setLoading(true);
@@ -313,6 +323,7 @@ export function HierarchyManager() {
       setFieldLabelInput("");
       setFieldDescriptionInput("");
       setFieldTypeInput("text");
+      setFieldScopeInput(selectedNode && !selectedNode.is_root ? "selected_node" : "family");
       setFieldStorageInput("custom_value");
       setFieldCoreColumnInput("");
       setFieldDisplayOrderInput("100");
@@ -342,6 +353,7 @@ export function HierarchyManager() {
     setFieldLabelInput(editingField.default_label);
     setFieldDescriptionInput(editingField.description || "");
     setFieldTypeInput(editingField.data_type);
+    setFieldScopeInput("family");
     setFieldStorageInput(editingField.storage_kind);
     setFieldCoreColumnInput(editingField.core_column_name || "");
     setFieldDisplayOrderInput(String(editingField.display_order_default));
@@ -364,7 +376,7 @@ export function HierarchyManager() {
     setOverrideDetailVisibleInput(editingField.effective_detail_visible);
     setOverrideFilterableInput(editingField.effective_filterable);
     setOverrideSortableInput(editingField.effective_sortable);
-  }, [editingField, selectedId]);
+  }, [editingField, selectedId, selectedNode]);
 
   async function handleSelect(node: HierarchyNode) {
     setSelectedId(node.id);
@@ -522,6 +534,7 @@ export function HierarchyManager() {
     setFieldLabelInput("");
     setFieldDescriptionInput("");
     setFieldTypeInput("text");
+    setFieldScopeInput(selectedNode && !selectedNode.is_root ? "selected_node" : "family");
     setFieldStorageInput("custom_value");
     setFieldCoreColumnInput("");
     setFieldDisplayOrderInput("100");
@@ -557,6 +570,14 @@ export function HierarchyManager() {
       setError("Field key and default label are required.");
       return;
     }
+    if (!editingField && fieldScopeInput === "selected_node" && !selectedNode) {
+      setError("Select a hierarchy node before creating a node-specific custom field.");
+      return;
+    }
+    if (!editingField && fieldScopeInput === "selected_node" && selectedNode?.is_root) {
+      setError("Selected-node custom fields must target a child node, not the family root.");
+      return;
+    }
 
     setSaving(true);
     setError("");
@@ -585,10 +606,28 @@ export function HierarchyManager() {
         isDetailVisibleDefault: fieldDetailVisibleInput,
         displayOrderDefault: Number(fieldDisplayOrderInput || 100),
         optionsJson,
-        validationJson
+        validationJson,
+        scopeMode: editingField ? "family" : fieldScopeInput,
+        override: !editingField && fieldScopeInput === "selected_node" && selectedNode
+          ? {
+              nodeId: selectedNode.id,
+              isVisible: fieldVisibleInput,
+              isRequired: fieldRequiredInput,
+              isFilterable: fieldFilterableInput,
+              isSortable: fieldSortableInput,
+              isGridVisible: fieldGridVisibleInput,
+              isIntakeVisible: fieldIntakeVisibleInput,
+              isDetailVisible: fieldDetailVisibleInput,
+              displayOrder: Number(fieldDisplayOrderInput || 100)
+            }
+          : undefined
       });
 
-      setNotice(`${result.field.default_label || fieldLabelInput.trim()} saved.`);
+      setNotice(
+        !editingField && fieldScopeInput === "selected_node"
+          ? `${result.field.default_label || fieldLabelInput.trim()} is now enabled for ${selectedNode?.name || "the selected node"} via selected-node custom-value settings.`
+          : `${result.field.default_label || fieldLabelInput.trim()} saved.`
+      );
       await loadTree(family, selectedId || undefined);
       setEditingFieldId(result.field.id || editingFieldId);
     } catch (saveError) {
@@ -1050,7 +1089,11 @@ export function HierarchyManager() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-semibold text-slate-900">{editingField ? `Edit ${editingField.default_label}` : "Create field definition"}</h4>
-                      <p className="mt-1 text-xs text-slate-500">Definitions apply to the whole {family} family unless a node override is added below.</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {editingField
+                          ? "Editing updates the saved definition. Use node overrides below for per-node visibility/labels."
+                          : "Create either a family-wide field definition or a selected-node custom field using the existing hierarchy override model."}
+                      </p>
                     </div>
                     {editingField && (
                       <button onClick={startCreateField} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white">
@@ -1076,13 +1119,38 @@ export function HierarchyManager() {
                         ))}
                       </select>
                     </div>
+                    {!editingField && (
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Scope</label>
+                        <select
+                          value={fieldScopeInput}
+                          onChange={(event) => setFieldScopeInput(event.target.value as FieldScopeMode)}
+                          disabled={saving}
+                          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
+                        >
+                          {FIELD_SCOPE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          {fieldScopeInput === "selected_node" && !selectedNode
+                            ? "Select a hierarchy node before saving a selected-node custom field."
+                            : (FIELD_SCOPE_OPTIONS.find((option) => option.value === fieldScopeInput)?.description) || ""}
+                        </p>
+                      </div>
+                    )}
                     <div>
-                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Storage</label>
-                      <select value={fieldStorageInput} onChange={(event) => setFieldStorageInput(event.target.value as FieldStorageKind)} disabled={saving || Boolean(editingField?.is_system)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100">
-                        {FIELD_STORAGE_OPTIONS.map((option) => (
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Storage model</label>
+                      <select value={fieldStorageInput} onChange={(event) => setFieldStorageInput(event.target.value as FieldStorageKind)} disabled={saving || Boolean(editingField)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100">
+                        {availableFieldStorageOptions.map((option) => (
                           <option key={option.value} value={option.value}>{option.label}</option>
                         ))}
                       </select>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {editingField
+                          ? "Storage type is locked after creation so saved data keeps using the same backend path."
+                          : "New admin-created fields are dynamic custom values saved in record_custom_field_values. Creating new physical core columns is intentionally disabled in Hierarchy Manager."}
+                      </p>
                     </div>
                     <div className="md:col-span-2">
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
