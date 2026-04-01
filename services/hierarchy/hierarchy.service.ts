@@ -894,6 +894,7 @@ export async function saveFieldDefinition(input: {
   displayOrderDefault?: number;
   optionsJson?: Record<string, unknown>;
   validationJson?: Record<string, unknown>;
+  scopeMode?: "family" | "selected_node";
   override?: {
     nodeId: string;
     overrideLabel?: string | null;
@@ -912,6 +913,81 @@ export async function saveFieldDefinition(input: {
   actorUserId?: string | null;
 }) {
   const supabase = createSupabaseAdminClient();
+  const scopeMode = input.scopeMode || "family";
+  let existingField: FieldDefinition | null = null;
+
+  if (!input.id && input.storageKind === "core_column") {
+    throw new Error("Creating new core-column fields from Hierarchy Manager is disabled. Create a custom value field instead.");
+  }
+  if (scopeMode === "selected_node" && input.storageKind !== "custom_value") {
+    throw new Error("Selected-node fields must use custom value storage.");
+  }
+  if (scopeMode === "selected_node" && !input.override?.nodeId) {
+    throw new Error("Selected-node fields require a target hierarchy node.");
+  }
+
+  const normalizedFieldKey = input.fieldKey.trim().toLowerCase();
+
+  if (input.id) {
+    const { data: existingRow, error: existingError } = await supabase
+      .from("field_definitions")
+      .select("*")
+      .eq("id", input.id)
+      .single();
+
+    if (existingError || !existingRow) throw new Error(existingError?.message || "Field definition not found");
+    existingField = normalizeFieldDefinition(existingRow as Record<string, unknown>);
+
+    if (existingField.storage_kind !== input.storageKind) {
+      throw new Error("Changing field storage kind is not supported. Create a new field instead.");
+    }
+    if (existingField.storage_kind === "core_column" && existingField.core_column_name !== (input.coreColumnName ?? null)) {
+      throw new Error("Changing the backing core column is not supported.");
+    }
+  }
+
+  let reusableFieldForSelectedNode: FieldDefinition | null = null;
+  if (!input.id && scopeMode === "selected_node") {
+    const { data: siblingRows, error: reusableError } = await supabase
+      .from("field_definitions")
+      .select("*")
+      .eq("family", input.family);
+
+    if (reusableError) throw new Error(reusableError.message);
+    const reusableRow = (siblingRows || []).find((row) => String(row.field_key || "").toLowerCase() === normalizedFieldKey);
+    if (reusableRow) {
+      const reusable = normalizeFieldDefinition(reusableRow as Record<string, unknown>);
+      if (reusable.storage_kind !== "custom_value") {
+        throw new Error(`Field key "${input.fieldKey}" already exists as a core-column field. Use a different key for a selected-node custom field.`);
+      }
+      if (!reusable.is_active) {
+        const { data: reactivatedRow, error: reactivateError } = await supabase
+          .from("field_definitions")
+          .update({
+            is_active: true,
+            is_visible_default: false,
+            is_required_default: false,
+            is_filterable_default: false,
+            is_sortable_default: false,
+            is_grid_visible_default: false,
+            is_intake_visible_default: false,
+            is_detail_visible_default: false
+          })
+          .eq("id", reusable.id)
+          .select("*")
+          .single();
+
+        if (reactivateError || !reactivatedRow) {
+          throw new Error(reactivateError?.message || "Failed to reactivate existing field definition");
+        }
+        reusableFieldForSelectedNode = normalizeFieldDefinition(reactivatedRow as Record<string, unknown>);
+      } else {
+        reusableFieldForSelectedNode = reusable;
+      }
+    }
+  }
+
+  const shouldCreateNodeScopedCustomField = !input.id && scopeMode === "selected_node" && !reusableFieldForSelectedNode;
   const definitionPayload = {
     family: input.family,
     field_key: input.fieldKey,
@@ -922,13 +998,13 @@ export async function saveFieldDefinition(input: {
     core_column_name: input.coreColumnName ?? null,
     is_system: input.isSystem ?? false,
     is_active: input.isActive ?? true,
-    is_visible_default: input.isVisibleDefault ?? true,
-    is_required_default: input.isRequiredDefault ?? false,
-    is_filterable_default: input.isFilterableDefault ?? true,
-    is_sortable_default: input.isSortableDefault ?? true,
-    is_grid_visible_default: input.isGridVisibleDefault ?? true,
-    is_intake_visible_default: input.isIntakeVisibleDefault ?? true,
-    is_detail_visible_default: input.isDetailVisibleDefault ?? true,
+    is_visible_default: shouldCreateNodeScopedCustomField ? false : input.isVisibleDefault ?? true,
+    is_required_default: shouldCreateNodeScopedCustomField ? false : input.isRequiredDefault ?? false,
+    is_filterable_default: shouldCreateNodeScopedCustomField ? false : input.isFilterableDefault ?? true,
+    is_sortable_default: shouldCreateNodeScopedCustomField ? false : input.isSortableDefault ?? true,
+    is_grid_visible_default: shouldCreateNodeScopedCustomField ? false : input.isGridVisibleDefault ?? true,
+    is_intake_visible_default: shouldCreateNodeScopedCustomField ? false : input.isIntakeVisibleDefault ?? true,
+    is_detail_visible_default: shouldCreateNodeScopedCustomField ? false : input.isDetailVisibleDefault ?? true,
     display_order_default: input.displayOrderDefault ?? 100,
     options_json: input.optionsJson || {},
     validation_json: input.validationJson || {},
@@ -936,7 +1012,9 @@ export async function saveFieldDefinition(input: {
   };
 
   let fieldRow: Record<string, unknown> | null = null;
-  if (input.id) {
+  if (reusableFieldForSelectedNode) {
+    fieldRow = reusableFieldForSelectedNode as unknown as Record<string, unknown>;
+  } else if (input.id) {
     const { data, error } = await supabase.from("field_definitions").update(definitionPayload).eq("id", input.id).select("*").single();
     if (error || !data) throw new Error(error?.message || "Failed to update field definition");
     fieldRow = data as Record<string, unknown>;
@@ -949,8 +1027,26 @@ export async function saveFieldDefinition(input: {
   const field = normalizeFieldDefinition(fieldRow);
   let override: HierarchyFieldOverride | null = null;
 
-  if (input.override) {
-    const overrideNode = await getNodeOrThrow(input.override.nodeId, { admin: true });
+  const effectiveOverrideInput = shouldCreateNodeScopedCustomField
+    ? {
+        nodeId: input.override?.nodeId || "",
+        overrideLabel: input.override?.overrideLabel ?? null,
+        isVisible: input.override?.isVisible ?? input.isVisibleDefault ?? true,
+        isRequired: input.override?.isRequired ?? input.isRequiredDefault ?? false,
+        isFilterable: input.override?.isFilterable ?? input.isFilterableDefault ?? true,
+        isSortable: input.override?.isSortable ?? input.isSortableDefault ?? true,
+        isGridVisible: input.override?.isGridVisible ?? input.isGridVisibleDefault ?? true,
+        isIntakeVisible: input.override?.isIntakeVisible ?? input.isIntakeVisibleDefault ?? true,
+        isDetailVisible: input.override?.isDetailVisible ?? input.isDetailVisibleDefault ?? true,
+        displayOrder: input.override?.displayOrder ?? input.displayOrderDefault ?? 100,
+        widthPx: input.override?.widthPx ?? null,
+        optionsOverrideJson: input.override?.optionsOverrideJson ?? null,
+        validationOverrideJson: input.override?.validationOverrideJson ?? null
+      }
+    : input.override;
+
+  if (effectiveOverrideInput) {
+    const overrideNode = await getNodeOrThrow(effectiveOverrideInput.nodeId, { admin: true });
     if (overrideNode.family !== field.family) {
       throw new Error(`Override node family ${overrideNode.family} does not match field family ${field.family}`);
     }
@@ -958,25 +1054,25 @@ export async function saveFieldDefinition(input: {
     const existing = await supabase
       .from("hierarchy_field_overrides")
       .select("id")
-      .eq("node_id", input.override.nodeId)
+      .eq("node_id", effectiveOverrideInput.nodeId)
       .eq("field_definition_id", field.id)
       .maybeSingle();
 
     const overridePayload = {
-      node_id: input.override.nodeId,
+      node_id: effectiveOverrideInput.nodeId,
       field_definition_id: field.id,
-      override_label: input.override.overrideLabel ?? null,
-      is_visible: input.override.isVisible ?? null,
-      is_required: input.override.isRequired ?? null,
-      is_filterable: input.override.isFilterable ?? null,
-      is_sortable: input.override.isSortable ?? null,
-      is_grid_visible: input.override.isGridVisible ?? null,
-      is_intake_visible: input.override.isIntakeVisible ?? null,
-      is_detail_visible: input.override.isDetailVisible ?? null,
-      display_order: input.override.displayOrder ?? null,
-      width_px: input.override.widthPx ?? null,
-      options_override_json: input.override.optionsOverrideJson ?? null,
-      validation_override_json: input.override.validationOverrideJson ?? null,
+      override_label: effectiveOverrideInput.overrideLabel ?? null,
+      is_visible: effectiveOverrideInput.isVisible ?? null,
+      is_required: effectiveOverrideInput.isRequired ?? null,
+      is_filterable: effectiveOverrideInput.isFilterable ?? null,
+      is_sortable: effectiveOverrideInput.isSortable ?? null,
+      is_grid_visible: effectiveOverrideInput.isGridVisible ?? null,
+      is_intake_visible: effectiveOverrideInput.isIntakeVisible ?? null,
+      is_detail_visible: effectiveOverrideInput.isDetailVisible ?? null,
+      display_order: effectiveOverrideInput.displayOrder ?? null,
+      width_px: effectiveOverrideInput.widthPx ?? null,
+      options_override_json: effectiveOverrideInput.optionsOverrideJson ?? null,
+      validation_override_json: effectiveOverrideInput.validationOverrideJson ?? null,
       created_by: input.actorUserId || null
     };
 

@@ -18,7 +18,10 @@ export async function DELETE(_request: NextRequest, { params }: { params: { id: 
       record_type: "media",
       record_id: mediaId,
       before_json: result.media as unknown as Record<string, unknown>,
-      after_json: { storageWarnings: result.storageWarnings },
+      after_json: {
+        storageWarnings: result.storageWarnings,
+        storageCleanup: result.storageCleanup
+      },
       source: "media"
     });
 

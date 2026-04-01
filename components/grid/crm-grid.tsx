@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ConfirmationModal } from "@/components/ui/confirmation-modal";
 import { useAuth } from "@/hooks/use-auth";
 import { fetchFieldDefinitionsApi } from "@/services/api/hierarchy-api.service";
 
@@ -73,6 +74,25 @@ type SavedView = {
   sorts: Sort[];
   hidden: Record<string, boolean>;
   pinned: string[];
+};
+
+type DeleteImpact = {
+  recordCount: number;
+  linkedMediaCount: number;
+  records: Array<{ id: string; code: string | null }>;
+};
+
+type DeleteResponse = {
+  error?: string;
+  deletedRecordIds?: string[];
+  deletedMediaCount?: number;
+  storageWarnings?: string[];
+  storageCleanup?: {
+    attemptedObjectCount: number;
+    deletedObjectCount: number;
+    queuedObjectCount: number;
+    warningCount: number;
+  };
 };
 
 const columnsByType: Record<GridType, GridColumn[]> = {
@@ -207,6 +227,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   const searchParams = useSearchParams();
   const { user } = useAuth();
   const isViewer = (user?.role || "viewer") === "viewer";
+  const isAdmin = (user?.role || "viewer") === "admin";
   const [rows, setRows] = useState<GridRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -231,6 +252,11 @@ export function CRMGrid({ type }: { type: GridType }) {
   const [taskDueDate, setTaskDueDate] = useState("");
   const [taskAssignedTo, setTaskAssignedTo] = useState("");
   const [authError, setAuthError] = useState("");
+  const [feedback, setFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteImpact, setDeleteImpact] = useState<DeleteImpact | null>(null);
+  const [deleteImpactLoading, setDeleteImpactLoading] = useState(false);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
 
 
   function handleUnauthorized() {
@@ -248,15 +274,29 @@ export function CRMGrid({ type }: { type: GridType }) {
   const [fieldVisibility, setFieldVisibility] = useState<Record<string, boolean>>({});
   const [selectedViewId, setSelectedViewId] = useState("");
   const [saveViewName, setSaveViewName] = useState("");
+  const [dynamicColumns, setDynamicColumns] = useState<GridColumn[]>([]);
+  const [effectiveGridOrder, setEffectiveGridOrder] = useState<Record<string, number>>({});
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const hierarchyNodeId = searchParams.get("nodeId") || "";
 
   const availableColumns = useMemo(() => {
-    return columnsByType[type]
+    const seen = new Set<string>();
+    const baseIndex = new Map(columnsByType[type].map((column, index) => [column.key, index]));
+    const merged = [...columnsByType[type], ...dynamicColumns].filter((column) => {
+      if (seen.has(column.key)) return false;
+      seen.add(column.key);
+      return true;
+    });
+    return merged
+      .sort((a, b) => {
+        const orderA = effectiveGridOrder[a.key] ?? 10_000 + (baseIndex.get(a.key) ?? 0);
+        const orderB = effectiveGridOrder[b.key] ?? 10_000 + (baseIndex.get(b.key) ?? 0);
+        return orderA - orderB || a.key.localeCompare(b.key);
+      })
       .filter((column) => fieldVisibility[column.key] ?? true)
       .map((column) => ({ ...column, label: fieldLabels[column.key] || column.label }));
-  }, [type, fieldLabels, fieldVisibility]);
+  }, [type, dynamicColumns, fieldLabels, fieldVisibility, effectiveGridOrder]);
 
   const columns = useMemo(() => {
     const map = new Map(availableColumns.map((c) => [c.key, c]));
@@ -264,6 +304,10 @@ export function CRMGrid({ type }: { type: GridType }) {
   }, [availableColumns, columnOrder]);
 
   const selectedCount = Object.values(selectedRows).filter(Boolean).length;
+  const selectedRecordIds = useMemo(
+    () => Object.entries(selectedRows).filter(([, selected]) => selected).map(([recordId]) => recordId),
+    [selectedRows]
+  );
 
   async function loadRows(reset = false) {
     setLoading(true);
@@ -305,6 +349,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   useEffect(() => {
     setPage(1);
     setSelectedRows({});
+    setFeedback(null);
     loadRows(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, sorts, filters, hierarchyNodeId]);
@@ -339,16 +384,38 @@ export function CRMGrid({ type }: { type: GridType }) {
         if (!active) return;
         const nextLabels: Record<string, string> = {};
         const nextVisibility: Record<string, boolean> = {};
+        const nextOrder: Record<string, number> = {};
+        const nextDynamicColumns: GridColumn[] = [];
         (result.fields || []).forEach((field) => {
           nextLabels[field.field_key] = field.effective_label || field.default_label;
           nextVisibility[field.field_key] = field.effective_grid_visible;
+          nextOrder[field.field_key] = field.effective_display_order;
+          if (field.storage_kind === "custom_value" && field.effective_grid_visible) {
+            nextDynamicColumns.push({
+              key: field.field_key,
+              label: field.effective_label || field.default_label,
+              editable: false,
+              width: field.effective_width_px || 160
+            });
+          }
+        });
+        nextDynamicColumns.sort((a, b) => {
+          const fieldA = (result.fields || []).find((field) => field.field_key === a.key);
+          const fieldB = (result.fields || []).find((field) => field.field_key === b.key);
+          const orderA = fieldA?.effective_display_order ?? 9999;
+          const orderB = fieldB?.effective_display_order ?? 9999;
+          return orderA - orderB || a.key.localeCompare(b.key);
         });
         setFieldLabels(nextLabels);
         setFieldVisibility(nextVisibility);
+        setEffectiveGridOrder(nextOrder);
+        setDynamicColumns(nextDynamicColumns);
       } catch {
         if (!active) return;
         setFieldLabels({});
         setFieldVisibility({});
+        setEffectiveGridOrder({});
+        setDynamicColumns([]);
       }
     }
     loadFieldLabels();
@@ -356,6 +423,19 @@ export function CRMGrid({ type }: { type: GridType }) {
       active = false;
     };
   }, [type, hierarchyNodeId]);
+
+  useEffect(() => {
+    const orderedKeys = availableColumns.map((column) => column.key);
+    setColumnOrder(orderedKeys);
+
+    setWidths((prev) => {
+      const next = { ...prev };
+      availableColumns.forEach((column) => {
+        if (!next[column.key]) next[column.key] = column.width || 140;
+      });
+      return next;
+    });
+  }, [availableColumns]);
 
   useEffect(() => {
     const nextFilters = extractFiltersFromParams(searchParams);
@@ -431,7 +511,9 @@ export function CRMGrid({ type }: { type: GridType }) {
   }, [searchParams, rows, loading]);
   async function openDrawer(id: string) {
     setDrawer({ open: true, loading: true, data: null });
-    const res = await fetch(`/api/grid/record-detail?type=${type}&id=${id}`, { cache: "no-store" });
+    const query = new URLSearchParams({ type, id });
+    if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
+    const res = await fetch(`/api/grid/record-detail?${query.toString()}`, { cache: "no-store" });
     const data = await res.json();
     setDrawer({ open: true, loading: false, data });
   }
@@ -684,6 +766,74 @@ ${exportData.spreadsheetUrl || ""}`);
     }
   }
 
+  async function openDeleteModal() {
+    if (!isAdmin || selectedRecordIds.length === 0) return;
+    setDeleteModalOpen(true);
+    setDeleteImpact(null);
+    setDeleteImpactLoading(true);
+    setFeedback(null);
+    try {
+      const res = await fetch("/api/grid/records/delete-impact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, recordIds: selectedRecordIds })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to load delete impact");
+      }
+      setDeleteImpact((data.impact || null) as DeleteImpact | null);
+    } catch (error) {
+      setDeleteModalOpen(false);
+      setFeedback({ tone: "error", message: error instanceof Error ? error.message : "Failed to load delete impact" });
+    } finally {
+      setDeleteImpactLoading(false);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!isAdmin || selectedRecordIds.length === 0) return;
+    setDeleteSubmitting(true);
+    setFeedback(null);
+    try {
+      const res = await fetch("/api/grid/records", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, recordIds: selectedRecordIds })
+      });
+      const data = await res.json().catch(() => ({} as DeleteResponse));
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to delete records");
+      }
+
+      const deletedRecordCount = data.deletedRecordIds?.length || selectedRecordIds.length;
+      const deletedMediaCount = data.deletedMediaCount || 0;
+      const attemptedObjects = data.storageCleanup?.attemptedObjectCount || 0;
+      const queuedObjects = data.storageCleanup?.queuedObjectCount || 0;
+      const deletedObjects = data.storageCleanup?.deletedObjectCount || 0;
+
+      let storageMessage = "";
+      if (attemptedObjects > 0) {
+        storageMessage = queuedObjects > 0
+          ? ` Storage cleanup removed ${deletedObjects} object path(s) and queued ${queuedObjects} path(s) for retry.`
+          : ` Storage cleanup removed ${deletedObjects} object path(s).`;
+      }
+
+      setDeleteModalOpen(false);
+      setSelectedRows({});
+      setPage(1);
+      await loadRows(true);
+      setFeedback({
+        tone: "success",
+        message: `Deleted ${deletedRecordCount} record(s) and ${deletedMediaCount} linked media row(s).${storageMessage}`
+      });
+    } catch (error) {
+      setFeedback({ tone: "error", message: error instanceof Error ? error.message : "Failed to delete records" });
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
+
   return (
     <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm">
       {(
@@ -723,11 +873,28 @@ ${exportData.spreadsheetUrl || ""}`);
         </div>
       </div>
 
+      {feedback && (
+        <div
+          className={`border-b px-3 py-2 text-sm ${
+            feedback.tone === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : "border-rose-200 bg-rose-50 text-rose-700"
+          }`}
+        >
+          {feedback.message}
+        </div>
+      )}
+
       {selectedCount > 0 && (
         <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-3 py-2 text-xs">
           <span>{selectedCount} selected</span>
           <button className="rounded border border-slate-300 px-2 py-1">Bulk set Active</button>
           <button className="rounded border border-slate-300 px-2 py-1">Bulk set Needs Review</button>
+          {isAdmin && (
+            <button onClick={openDeleteModal} className="rounded border border-rose-300 px-2 py-1 font-medium text-rose-700 hover:bg-rose-50">
+              Delete selected
+            </button>
+          )}
           <button className="rounded border border-slate-300 px-2 py-1" onClick={() => setSelectedRows({})}>Clear</button>
         </div>
       )}
@@ -991,6 +1158,33 @@ ${exportData.spreadsheetUrl || ""}`);
         </div>
       )}
 
+      <ConfirmationModal
+        open={deleteModalOpen}
+        title={`Delete ${selectedCount} record${selectedCount === 1 ? "" : "s"}?`}
+        description="This permanently deletes the selected CRM records and related database rows. Linked storage objects are deleted after the database delete commits; any storage failures are queued for retry instead of blocking the record delete."
+        impacts={
+          deleteImpactLoading
+            ? ["Loading delete impact…"]
+            : [
+                `Records selected: ${deleteImpact?.recordCount || selectedCount}`,
+                `Linked media: ${deleteImpact?.linkedMediaCount || 0}`,
+                "Database rows are deleted transactionally before storage cleanup begins.",
+                "Storage cleanup runs as a follow-up step and failed object deletes are queued for retry.",
+                ...(deleteImpact?.records?.slice(0, 5).map((record) => `Record: ${record.code || record.id}`) || []),
+                ...(deleteImpact && deleteImpact.records.length > 5 ? [`Additional records: ${deleteImpact.records.length - 5}`] : [])
+              ]
+        }
+        confirmLabel="Delete records"
+        confirming={deleteSubmitting}
+        confirmDisabled={deleteImpactLoading || selectedRecordIds.length === 0}
+        tone="danger"
+        onClose={() => {
+          if (deleteSubmitting) return;
+          setDeleteModalOpen(false);
+        }}
+        onConfirm={confirmDelete}
+      />
+
       {drawer.open && (
         <aside className="fixed right-0 top-0 z-50 h-screen w-[460px] border-l border-slate-200 bg-white shadow-xl">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
@@ -1007,12 +1201,30 @@ ${exportData.spreadsheetUrl || ""}`);
                     <p className="mb-2 text-xs text-slate-500">Edited by {drawer.data.last_edited.by || "System"} at {relTime(drawer.data.last_edited.at)}</p>
                   )}
                   <div className="space-y-2">
-                    {Object.entries(drawer.data.record || {}).slice(0, 12).map(([k, v]) => (
-                      <div key={k} className="grid grid-cols-[120px_1fr] gap-2">
-                        <span className="text-xs text-slate-500">{k}</span>
-                        <input defaultValue={String(v ?? "")} className="rounded border border-slate-300 px-2 py-1 text-xs" />
-                      </div>
-                    ))}
+                    {Array.isArray(drawer.data.fields) && drawer.data.fields.filter((field: any) => field.effective_detail_visible).length > 0
+                      ? drawer.data.fields
+                          .filter((field: any) => field.effective_detail_visible)
+                          .map((field: any) => {
+                            const rawValue = drawer.data.field_values?.[field.field_key];
+                            const displayValue = Array.isArray(rawValue)
+                              ? rawValue.join(", ")
+                              : rawValue && typeof rawValue === "object"
+                                ? JSON.stringify(rawValue)
+                                : String(rawValue ?? "");
+
+                            return (
+                              <div key={field.id} className="grid grid-cols-[120px_1fr] gap-2">
+                                <span className="text-xs text-slate-500">{field.effective_label}</span>
+                                <input defaultValue={displayValue} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                              </div>
+                            );
+                          })
+                      : Object.entries(drawer.data.record || {}).slice(0, 12).map(([k, v]) => (
+                          <div key={k} className="grid grid-cols-[120px_1fr] gap-2">
+                            <span className="text-xs text-slate-500">{k}</span>
+                            <input defaultValue={String(v ?? "")} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                          </div>
+                        ))}
                   </div>
                 </div>
 
