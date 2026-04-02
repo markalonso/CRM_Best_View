@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getRequestActor } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { fetchRecordsByNode } from "@/services/hierarchy/hierarchy.service";
 import { nodeRecordsQuerySchema } from "@/services/hierarchy/hierarchy.schemas";
 
 export async function GET(request: NextRequest) {
   try {
-    const actor = await getRequestActor(request);
-    if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const { searchParams } = new URL(request.url);
     const query = nodeRecordsQuerySchema.parse({

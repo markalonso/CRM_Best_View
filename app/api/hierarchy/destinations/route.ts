@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { createHierarchyDestinationNode, fetchAllowedHierarchyDestinationNodes } from "@/services/hierarchy/hierarchy.service";
 import { createHierarchyDestinationSchema, hierarchyAllowedDestinationsQuerySchema } from "@/services/hierarchy/hierarchy.schemas";
 
 export async function GET(request: NextRequest) {
   try {
-    const actor = await getRequestActor(request);
-    if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const { searchParams } = new URL(request.url);
     const query = hierarchyAllowedDestinationsQuerySchema.parse({
@@ -25,8 +25,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const actor = await getRequestActor(request);
-    if (!hasRole(actor.role, "admin")) return NextResponse.json({ error: "Only admins can create hierarchy destinations from intake." }, { status: 403 });
+    const { actor, errorResponse } = await requireAdminActor(request, "Only admins can create hierarchy destinations from intake.");
+    if (errorResponse) return errorResponse;
 
     const payload = createHierarchyDestinationSchema.parse(await request.json());
     const node = await createHierarchyDestinationNode({

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { getRequestActor, requireAdminActor } from "@/services/auth/role.service";
 import { createTimelineEvent } from "@/services/intake/confirm-intake.service";
 import { normalizeContactPhone } from "@/services/contacts/contact-linking.service";
 import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from "@/services/hierarchy/hierarchy.service";
@@ -51,12 +51,18 @@ async function resolveEffectiveNodeId(supabase: ReturnType<typeof createSupabase
 }
 
 export async function GET(request: NextRequest) {
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const supabase = createSupabaseClient();
   const { searchParams } = new URL(request.url);
   const type = (searchParams.get("type") || "sale") as GridType;
   const id = searchParams.get("id") || "";
 
   if (!map[type] || !id) return NextResponse.json({ error: "Invalid params" }, { status: 400 });
+  if (actor.role === "agent" && type !== "sale" && type !== "rent") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const hierarchyNodeId = await resolveEffectiveNodeId(supabase, type, id, searchParams.get("nodeId") || "");
 
   const { data: record, error } = await supabase.from(map[type].table).select("*").eq("id", id).single();
@@ -203,8 +209,8 @@ type PatchBody = {
 };
 
 export async function PATCH(request: NextRequest) {
-  const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const { errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
 
   const body = (await request.json()) as PatchBody;
   if (!map[body.type] || !body.id || !body.action) return NextResponse.json({ error: "Invalid params" }, { status: 400 });

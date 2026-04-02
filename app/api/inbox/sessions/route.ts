@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { buildMediaPath, detectMediaType, mediaStorageProvider } from "@/services/media/media-manager.service";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { getRequestActor, requireAdminActor } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 
 type IntakeStatus = "draft" | "needs_review" | "confirmed";
@@ -38,6 +38,9 @@ export async function GET(request: NextRequest) {
     if (!actor.userId) {
       console.warn("[inbox/sessions] unauthorized GET", { hasSession: hasAuthHeader || hasCookieHeader, hasUser: false });
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (actor.role !== "admin") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     const { searchParams } = new URL(request.url);
@@ -174,15 +177,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const supabase = createSupabaseClient();
-  const actor = await getRequestActor(request);
-  if (!actor.userId) {
-    console.warn("[inbox/sessions] unauthorized POST", { hasSession: false });
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (!hasRole(actor.role, "agent")) {
-    console.warn("[inbox/sessions] forbidden POST", { hasSession: true, userId: actor.userId, role: actor.role });
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
-  }
+  const { actor, errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
   const formData = await request.formData();
   const rawText = String(formData.get("raw_text") || "").trim();
   const files = formData.getAll("files").filter((value): value is File => value instanceof File);

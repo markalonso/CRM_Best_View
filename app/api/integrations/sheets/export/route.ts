@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { googleSheetsIntegrationService, type SheetDataset } from "@/services/integrations/google-sheets.service";
 
 type Body = {
@@ -9,6 +10,9 @@ type Body = {
 
 export async function POST(request: NextRequest) {
   try {
+    const { errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
+
     const body = (await request.json()) as Body;
     if (!body.dataset || !Array.isArray(body.rows)) return NextResponse.json({ error: "dataset and rows are required" }, { status: 400 });
 
