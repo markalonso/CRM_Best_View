@@ -80,6 +80,9 @@ export async function GET(request: NextRequest) {
       nodeId: searchParams.get("nodeId") || undefined,
       mediaType: searchParams.get("mediaType") || "all"
     });
+    if (actor.role === "agent" && query.family !== "sale" && query.family !== "rent") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
     const treeResult = await fetchHierarchyTree(query.family);
     const counts = await fetchMediaCountsByFamily(query.family);
@@ -99,9 +102,19 @@ export async function GET(request: NextRequest) {
     const unassignedMedia = query.nodeId ? [] : await fetchUnassignedMediaForFamily(query.family);
     const media = [...scopedMedia, ...unassignedMedia];
 
+    const agentFilteredMedia = actor.role === "agent"
+      ? media.filter((item) => {
+          const recordType = String(item.record_type || "");
+          return recordType === "properties_sale" || recordType === "properties_rent";
+        })
+      : media;
+
     const filteredMedia = query.mediaType === "all"
-      ? media
-      : media.filter((item) => String(item.media_type || "other") === query.mediaType);
+      ? agentFilteredMedia
+      : agentFilteredMedia.filter((item) => String(item.media_type || "other") === query.mediaType);
+    const filteredUnassignedCount = agentFilteredMedia.filter((item) =>
+      !item.record_type && Boolean(item.intake_session_id)
+    ).length;
 
     return NextResponse.json({
       family: query.family,
@@ -110,7 +123,7 @@ export async function GET(request: NextRequest) {
       tree: treeResult.tree,
       nodes: treeResult.nodes,
       counts,
-      unassignedCount: unassignedMedia.length,
+      unassignedCount: actor.role === "agent" ? filteredUnassignedCount : unassignedMedia.length,
       media: filteredMedia
     });
   } catch (error) {

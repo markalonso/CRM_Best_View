@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
+import { getRequestActor } from "@/services/auth/role.service";
 
 type SearchRecordType = "sale" | "rent" | "buyer" | "client" | "contact" | "inbox" | "media";
 
@@ -48,6 +49,9 @@ function mostlyDigits(input: string) {
 }
 
 export async function GET(request: NextRequest) {
+  const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const q = (new URL(request.url).searchParams.get("q") || "").trim();
   if (!q) return NextResponse.json({ query: "", groups: [] });
 
@@ -197,6 +201,7 @@ export async function GET(request: NextRequest) {
     { key: "inbox", label: "Inbox", items: inboxItems },
     { key: "media", label: "Media", items: mediaItems }
   ]
+    .filter((group) => actor.role !== "agent" || ["sale", "rent", "media"].includes(group.key))
     .map((group) => ({ ...group, count: group.items.length }))
     .filter((group) => group.count > 0)
     .sort((a, b) => {
@@ -211,6 +216,6 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     query: q,
     groups: grouped,
-    quick_actions: [{ id: "quick-intake", label: "Quick create intake", href: "/inbox?quickCreate=1" }]
+    quick_actions: actor.role === "admin" ? [{ id: "quick-intake", label: "Quick create intake", href: "/inbox?quickCreate=1" }] : []
   });
 }

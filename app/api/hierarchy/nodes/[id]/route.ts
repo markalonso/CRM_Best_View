@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { deleteHierarchyNode, fetchHierarchyNodeDetails, updateHierarchyNode } from "@/services/hierarchy/hierarchy.service";
 import { hierarchyNodeIdSchema, updateHierarchyNodeSchema } from "@/services/hierarchy/hierarchy.schemas";
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const actor = await getRequestActor(request);
-    if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const nodeId = hierarchyNodeIdSchema.parse(params.id);
     const details = await fetchHierarchyNodeDetails(nodeId);
@@ -21,8 +21,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const actor = await getRequestActor(request);
-    if (!hasRole(actor.role, "admin")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    const { actor, errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const nodeId = hierarchyNodeIdSchema.parse(params.id);
     const before = await fetchHierarchyNodeDetails(nodeId);
@@ -63,8 +63,8 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const actor = await getRequestActor(request);
-    if (!hasRole(actor.role, "admin")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    const { actor, errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const nodeId = hierarchyNodeIdSchema.parse(params.id);
     const before = await fetchHierarchyNodeDetails(nodeId);

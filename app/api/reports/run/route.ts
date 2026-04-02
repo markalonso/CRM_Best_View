@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
+import { requireAdminActor } from "@/services/auth/role.service";
 
 type Dataset = "sale" | "rent" | "buyer" | "client";
 type GroupBy = "area" | "compound" | "status" | "furnished" | "finishing" | "source" | "currency" | "preferred_area";
@@ -173,6 +174,9 @@ async function runNeedsReviewBreakdown() {
 }
 
 export async function POST(request: NextRequest) {
+  const { errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
+
   const body = (await request.json().catch(() => ({}))) as RunReportBody;
 
   if (body.template === "needs_review_breakdown") return runNeedsReviewBreakdown();

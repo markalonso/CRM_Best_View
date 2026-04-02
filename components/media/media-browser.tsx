@@ -68,6 +68,7 @@ export function MediaBrowser() {
   const searchParams = useSearchParams();
   const { user, loading: authLoading } = useAuth();
   const isAdmin = (user?.role || "viewer") === "admin";
+  const isAgent = (user?.role || "viewer") === "agent";
 
   const [data, setData] = useState<BrowserResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -83,6 +84,16 @@ export function MediaBrowser() {
   const family = (searchParams.get("family") || "sale") as MediaFamily;
   const nodeId = searchParams.get("nodeId") || "";
   const mediaType = (searchParams.get("mediaType") || "all") as MediaKind;
+
+  const familyOptions = isAgent ? FAMILY_OPTIONS.filter((option) => option.id === "sale" || option.id === "rent") : FAMILY_OPTIONS;
+
+  useEffect(() => {
+    if (!isAgent) return;
+    if (family !== "sale" && family !== "rent") {
+      updateQuery({ family: "sale", nodeId: "" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAgent, family]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -207,7 +218,7 @@ export function MediaBrowser() {
               <p className="mt-1 text-sm text-slate-600">Browse media by family and hierarchy path while keeping preview/download behavior intact.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {FAMILY_OPTIONS.map((option) => (
+              {familyOptions.map((option) => (
                 <button
                   key={option.id}
                   type="button"
@@ -236,7 +247,7 @@ export function MediaBrowser() {
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <button type="button" onClick={() => updateQuery({ nodeId: "" })} className={`rounded-full px-3 py-1 ${!selectedNode ? "bg-slate-900 text-white" : "border border-slate-300 bg-white text-slate-700"}`}>
-              All {FAMILY_OPTIONS.find((option) => option.id === family)?.label} media
+              All {familyOptions.find((option) => option.id === family)?.label} media
             </button>
             {breadcrumbNodes.map((node) => (
               <div key={node.id} className="flex items-center gap-2">
