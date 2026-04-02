@@ -226,7 +226,9 @@ export function CRMGrid({ type }: { type: GridType }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user } = useAuth();
-  const isViewer = (user?.role || "viewer") === "viewer";
+  const role = user?.role || "viewer";
+  const isViewer = role === "viewer" || role === "agent";
+  const isAgentMode = role === "agent";
   const isAdmin = (user?.role || "viewer") === "admin";
   const [rows, setRows] = useState<GridRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -279,6 +281,8 @@ export function CRMGrid({ type }: { type: GridType }) {
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const hierarchyNodeId = searchParams.get("nodeId") || "";
+  const showSelection = !isViewer;
+  const tableExtraColumns = showSelection ? 4 : 3;
 
   const availableColumns = useMemo(() => {
     const seen = new Set<string>();
@@ -288,7 +292,11 @@ export function CRMGrid({ type }: { type: GridType }) {
       seen.add(column.key);
       return true;
     });
-    return merged
+    const roleScoped = isAgentMode && (type === "sale" || type === "rent")
+      ? merged.filter((column) => ["code", "status", "source"].includes(column.key))
+      : merged;
+
+    return roleScoped
       .sort((a, b) => {
         const orderA = effectiveGridOrder[a.key] ?? 10_000 + (baseIndex.get(a.key) ?? 0);
         const orderB = effectiveGridOrder[b.key] ?? 10_000 + (baseIndex.get(b.key) ?? 0);
@@ -296,7 +304,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       })
       .filter((column) => fieldVisibility[column.key] ?? true)
       .map((column) => ({ ...column, label: fieldLabels[column.key] || column.label }));
-  }, [type, dynamicColumns, fieldLabels, fieldVisibility, effectiveGridOrder]);
+  }, [type, dynamicColumns, fieldLabels, fieldVisibility, effectiveGridOrder, isAgentMode]);
 
   const columns = useMemo(() => {
     const map = new Map(availableColumns.map((c) => [c.key, c]));
@@ -854,7 +862,7 @@ ${exportData.spreadsheetUrl || ""}`);
 
           <button onClick={exportCsv} className="rounded border border-slate-300 px-3 py-1.5 text-sm">Export CSV</button>
           <button onClick={exportGoogleSheets} className="rounded border border-slate-300 px-3 py-1.5 text-sm">Export to Google Sheets</button>
-          <button disabled={isViewer} onClick={() => setShowIntakeModal(true)} className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-40">New Intake</button>
+          {!isViewer && <button onClick={() => setShowIntakeModal(true)} className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white">New Intake</button>}
         </div>
       )}
 
@@ -885,7 +893,7 @@ ${exportData.spreadsheetUrl || ""}`);
         </div>
       )}
 
-      {selectedCount > 0 && (
+      {showSelection && selectedCount > 0 && (
         <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-3 py-2 text-xs">
           <span>{selectedCount} selected</span>
           <button className="rounded border border-slate-300 px-2 py-1">Bulk set Active</button>
@@ -921,17 +929,19 @@ ${exportData.spreadsheetUrl || ""}`);
         <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-slate-100">
             <tr>
-              <th className="sticky left-0 z-30 w-10 border-b border-slate-200 bg-slate-100 px-2 py-2">
-                <input
-                  type="checkbox"
-                  checked={rows.length > 0 && rows.every((r) => selectedRows[r.id])}
-                  onChange={(e) => {
-                    const next: Record<string, boolean> = {};
-                    rows.forEach((r) => (next[r.id] = e.target.checked));
-                    setSelectedRows(next);
-                  }}
-                />
-              </th>
+              {showSelection && (
+                <th className="sticky left-0 z-30 w-10 border-b border-slate-200 bg-slate-100 px-2 py-2">
+                  <input
+                    type="checkbox"
+                    checked={rows.length > 0 && rows.every((r) => selectedRows[r.id])}
+                    onChange={(e) => {
+                      const next: Record<string, boolean> = {};
+                      rows.forEach((r) => (next[r.id] = e.target.checked));
+                      setSelectedRows(next);
+                    }}
+                  />
+                </th>
+              )}
 
               {columns.map((col) => {
                 if (hidden[col.key]) return null;
@@ -989,21 +999,29 @@ ${exportData.spreadsheetUrl || ""}`);
           <tbody>
             {loading && rows.length === 0 && Array.from({ length: 8 }).map((_, i) => (
               <tr key={`s-${i}`} className="animate-pulse border-b border-slate-100">
-                <td className="h-10 bg-slate-50" colSpan={columns.length + 4} />
+                <td className="h-10 bg-slate-50" colSpan={columns.length + tableExtraColumns} />
               </tr>
             ))}
 
             {!loading && rows.length === 0 && (
               <tr>
-                <td colSpan={columns.length + 4} className="px-3 py-10 text-center text-sm text-slate-500">{hierarchyNodeId ? "No records found in this hierarchy layer." : "No records found."}</td>
+                <td colSpan={columns.length + tableExtraColumns} className="px-3 py-10 text-center text-sm text-slate-500">
+                  {isAgentMode
+                    ? `No ${type} records available yet.`
+                    : hierarchyNodeId
+                      ? "No records found in this hierarchy layer."
+                      : "No records found."}
+                </td>
               </tr>
             )}
 
             {rows.map((row) => (
               <tr key={row.id} className="cursor-pointer border-b border-slate-100 hover:bg-slate-50" onClick={() => openDrawer(row.id)}>
-                <td className="sticky left-0 z-10 bg-white px-2 py-2" onClick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" checked={!!selectedRows[row.id]} onChange={(e) => setSelectedRows((prev) => ({ ...prev, [row.id]: e.target.checked }))} />
-                </td>
+                {showSelection && (
+                  <td className="sticky left-0 z-10 bg-white px-2 py-2" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={!!selectedRows[row.id]} onChange={(e) => setSelectedRows((prev) => ({ ...prev, [row.id]: e.target.checked }))} />
+                  </td>
+                )}
 
                 {columns.map((col) => {
                   if (hidden[col.key]) return null;
@@ -1194,9 +1212,47 @@ ${exportData.spreadsheetUrl || ""}`);
           <div className="h-[calc(100%-56px)] overflow-auto p-4">
             {drawer.loading && <p className="text-sm text-slate-500">Loading...</p>}
             {!drawer.loading && drawer.data && (
-              <div className="space-y-4 text-sm">
+              isViewer && (type === "sale" || type === "rent") ? (
+                <div className="space-y-4 text-sm">
+                  <div className="rounded border border-slate-200 p-3">
+                    <h4 className="mb-2 font-semibold">Record overview</h4>
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                      {[
+                        ["Code", drawer.data.record?.code],
+                        ["Status", drawer.data.record?.status],
+                        ["Source", drawer.data.record?.source],
+                        ["Price", drawer.data.record?.price],
+                        ["Currency", drawer.data.record?.currency],
+                        ["Area", drawer.data.record?.area],
+                        ["Compound", drawer.data.record?.compound],
+                        ["Bedrooms", drawer.data.record?.bedrooms],
+                        ["Bathrooms", drawer.data.record?.bathrooms],
+                        ["Updated", relTime(drawer.data.record?.updated_at)]
+                      ].map(([label, value]) => (
+                        <div key={label as string} className="rounded bg-slate-50 px-3 py-2">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{String(label)}</p>
+                          <p className="text-sm text-slate-800">{String(value ?? "-")}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded border border-slate-200 p-3">
+                    <h4 className="mb-2 font-semibold">Linked media</h4>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(drawer.data.media || []).slice(0, 15).map((m: any) => (
+                        <a key={m.id} href={m.file_url} target="_blank" className="rounded bg-slate-100 p-2 text-xs" rel="noreferrer">
+                          {m.media_type || "file"}
+                        </a>
+                      ))}
+                    </div>
+                    {(drawer.data.media || []).length === 0 && <p className="text-xs text-slate-500">No media linked to this record.</p>}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 text-sm">
                 <div className="rounded border border-slate-200 p-3">
-                  <h4 className="mb-2 font-semibold">Editable fields</h4>
+                  <h4 className="mb-2 font-semibold">{isViewer ? "Record fields" : "Editable fields"}</h4>
                   {drawer.data.last_edited && (
                     <p className="mb-2 text-xs text-slate-500">Edited by {drawer.data.last_edited.by || "System"} at {relTime(drawer.data.last_edited.at)}</p>
                   )}
@@ -1215,14 +1271,14 @@ ${exportData.spreadsheetUrl || ""}`);
                             return (
                               <div key={field.id} className="grid grid-cols-[120px_1fr] gap-2">
                                 <span className="text-xs text-slate-500">{field.effective_label}</span>
-                                <input defaultValue={displayValue} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                                <input defaultValue={displayValue} readOnly={isViewer} className="rounded border border-slate-300 px-2 py-1 text-xs" />
                               </div>
                             );
                           })
                       : Object.entries(drawer.data.record || {}).slice(0, 12).map(([k, v]) => (
                           <div key={k} className="grid grid-cols-[120px_1fr] gap-2">
                             <span className="text-xs text-slate-500">{k}</span>
-                            <input defaultValue={String(v ?? "")} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                            <input defaultValue={String(v ?? "")} readOnly={isViewer} className="rounded border border-slate-300 px-2 py-1 text-xs" />
                           </div>
                         ))}
                   </div>
@@ -1401,6 +1457,7 @@ ${exportData.spreadsheetUrl || ""}`);
                   <button className="rounded border border-slate-300 px-2 py-1 text-xs">Create follow-up task</button>
                 </div>
               </div>
+              )
             )}
           </div>
         </aside>

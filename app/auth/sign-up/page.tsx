@@ -12,6 +12,17 @@ export default function SignUpPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  async function resolveLandingPath() {
+    try {
+      const res = await fetch("/api/auth/me", { cache: "no-store" });
+      const data = await res.json();
+      const role = String(data?.actor?.role || "viewer");
+      return role === "admin" ? "/inbox" : "/sale";
+    } catch {
+      return "/sale";
+    }
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -37,7 +48,8 @@ export default function SignUpPage() {
       return;
     }
 
-    router.replace("/inbox");
+    const landingPath = await resolveLandingPath();
+    router.replace(landingPath);
     router.refresh();
   }
 

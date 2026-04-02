@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
+import { requireAdminActor } from "@/services/auth/role.service";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
 type QuestionType = "text" | "number" | "select" | "multiselect" | "phone";
@@ -62,6 +63,9 @@ function deriveQuestions(type: ReviewType, aiJson: Record<string, unknown>, rawT
 }
 
 export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+  const { errorResponse } = await requireAdminActor(_request);
+  if (errorResponse) return errorResponse;
+
   const supabase = createSupabaseClient();
 
   const { data: session, error } = await supabase

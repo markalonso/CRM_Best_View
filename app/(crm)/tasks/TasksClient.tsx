@@ -35,7 +35,7 @@ function rel(date: string | null) {
 export default function TasksClient() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
-  const isViewer = (user?.role || "viewer") === "viewer";
+  const isViewer = (user?.role || "viewer") === "viewer" || (user?.role || "viewer") === "agent";
   const [view, setView] = useState<(typeof VIEWS)[number]["id"]>("my");
   const [rows, setRows] = useState<TaskRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,6 +92,7 @@ export default function TasksClient() {
           ))}
         </div>
       </div>
+      {isViewer && <p className="text-xs text-slate-500">Tasks are currently read-only in agent mode while workflow redesign is pending.</p>}
 
       {loading && <p className="text-sm text-slate-500">Loading tasks...</p>}
 

@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { assignRecordToHierarchyNode } from "@/services/hierarchy/hierarchy.service";
 import { assignRecordToNodeSchema } from "@/services/hierarchy/hierarchy.schemas";
 
 export async function POST(request: NextRequest) {
   try {
-    const actor = await getRequestActor(request);
-    if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    const { actor, errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
 
     const payload = assignRecordToNodeSchema.parse(await request.json());
     const link = await assignRecordToHierarchyNode({

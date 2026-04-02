@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 
 type RelatedType = "sale" | "rent" | "buyer" | "client" | "contact";
 
@@ -13,8 +13,8 @@ const relatedToRecordType: Record<RelatedType, "properties_sale" | "properties_r
 };
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
-  const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const { errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
 
   const body = (await request.json()) as { status?: "open" | "done" | "cancelled"; due_date?: string | null; assigned_to?: string | null; title?: string };
   const updates: Record<string, unknown> = {};

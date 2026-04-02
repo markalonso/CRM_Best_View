@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ADMIN_SIDEBAR_ITEMS, SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
+import { ADMIN_SIDEBAR_ITEMS, AGENT_SIDEBAR_ITEMS, SIDEBAR_ITEMS, VIEW_MODES } from "./navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -29,7 +29,7 @@ type FlatItem = SearchResultItem | QuickActionItem;
 export function CRMShell({ children }: CRMShellProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [results, setResults] = useState<Array<{ key: string; label: string; count: number; items: SearchResultItem[] }>>([]);
@@ -41,7 +41,18 @@ export function CRMShell({ children }: CRMShellProps) {
     const rows = results.flatMap((group) => group.items);
     return [...rows, ...quickActions.map((action) => ({ ...action, isAction: true as const }))];
   }, [results, quickActions]);
-  const navItems = (user?.role || "viewer") === "admin" ? [...SIDEBAR_ITEMS, ...ADMIN_SIDEBAR_ITEMS] : SIDEBAR_ITEMS;
+  const role = user?.role || "viewer";
+  const isAdmin = role === "admin";
+  const isAgent = role === "agent" || role === "viewer";
+  const navItems = isAdmin ? [...SIDEBAR_ITEMS, ...ADMIN_SIDEBAR_ITEMS] : AGENT_SIDEBAR_ITEMS;
+
+  useEffect(() => {
+    if (loading || !isAgent) return;
+    const allowed = new Set(["/sale", "/rent", "/media", "/tasks"]);
+    if (!allowed.has(pathname)) {
+      router.replace("/sale");
+    }
+  }, [isAgent, loading, pathname, router]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -59,7 +70,7 @@ export function CRMShell({ children }: CRMShellProps) {
   useEffect(() => {
     if (!open || !query.trim()) {
       setResults([]);
-      setQuickActions([{ id: "quick-intake", label: "Quick create intake", href: "/inbox?quickCreate=1" }]);
+      setQuickActions(isAdmin ? [{ id: "quick-intake", label: "Quick create intake", href: "/inbox?quickCreate=1" }] : []);
       setActiveIndex(0);
       return;
     }
@@ -74,7 +85,15 @@ export function CRMShell({ children }: CRMShellProps) {
     }, 180);
 
     return () => clearTimeout(timer);
-  }, [query, open]);
+  }, [isAdmin, query, open]);
+
+  if (loading) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 text-slate-700">
+        <p className="text-sm font-medium">Loading workspace…</p>
+      </div>
+    );
+  }
 
   function runSelection(item: FlatItem) {
     setOpen(false);
@@ -139,15 +158,19 @@ export function CRMShell({ children }: CRMShellProps) {
               placeholder="Global Search"
               className="h-10 w-[380px] rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-500"
             />
-            <button onClick={() => router.push("/inbox?quickCreate=1")} className="h-10 rounded-lg bg-slate-900 px-4 text-sm font-medium text-white hover:bg-slate-700">
-              Add New Intake
-            </button>
+            {isAdmin && (
+              <button onClick={() => router.push("/inbox?quickCreate=1")} className="h-10 rounded-lg bg-slate-900 px-4 text-sm font-medium text-white hover:bg-slate-700">
+                Add New Intake
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
-              Notifications
-            </button>
+            {isAdmin && (
+              <button className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
+                Notifications
+              </button>
+            )}
             <button
               onClick={async () => {
                 const supabase = createSupabaseBrowserClient();
@@ -204,17 +227,21 @@ export function CRMShell({ children }: CRMShellProps) {
         </header>
 
         <div className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
-          <p className="text-sm text-slate-500">Prepared layout modes for fast, data-first workflows.</p>
-          <div className="flex items-center gap-2">
-            {VIEW_MODES.map((mode) => (
-              <button
-                key={mode}
-                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-100"
-              >
-                {mode}
-              </button>
-            ))}
-          </div>
+          <p className="text-sm text-slate-500">
+            {isAdmin ? "Prepared layout modes for fast, data-first workflows." : "Read-only workspace for browsing sale, rent, media, and tasks."}
+          </p>
+          {isAdmin && (
+            <div className="flex items-center gap-2">
+              {VIEW_MODES.map((mode) => (
+                <button
+                  key={mode}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-100"
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <main className="flex-1 p-6">{children}</main>

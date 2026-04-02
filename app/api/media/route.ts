@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { getRequestActor, requireAdminActor } from "@/services/auth/role.service";
 import { assignMediaToHierarchyNode } from "@/services/hierarchy/hierarchy.service";
 import { buildMediaPath, detectMediaType, mediaStorageProvider } from "@/services/media/media-manager.service";
 
@@ -35,6 +35,9 @@ export async function GET(request: NextRequest) {
   const intakeSessionId = searchParams.get("intake_session_id");
   const recordType = searchParams.get("record_type");
   const recordId = searchParams.get("record_id");
+  if (actor.role === "agent" && recordType && !["properties_sale", "properties_rent"].includes(recordType)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   let query = supabase
     .from("media")
@@ -45,6 +48,9 @@ export async function GET(request: NextRequest) {
   if (intakeSessionId) query = query.eq("intake_session_id", intakeSessionId);
   if (recordType) query = query.eq("record_type", recordType);
   if (recordId) query = query.eq("record_id", recordId);
+  if (actor.role === "agent" && !recordType) {
+    query = query.in("record_type", ["properties_sale", "properties_rent"]);
+  }
 
   const { data, error } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -52,9 +58,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const actor = await getRequestActor(request);
-  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const { actor, errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
 
   const supabase = createSupabaseClient();
   const form = await request.formData();
