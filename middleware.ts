@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 const protectedPrefixes = [
+  "/admin",
   "/inbox",
   "/sale",
   "/rent",
@@ -23,6 +24,12 @@ function isProtectedPath(pathname: string) {
 function isProtectedApi(pathname: string) {
   if (!pathname.startsWith("/api")) return false;
   return !publicApiPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+const agentAllowedPrefixes = ["/sale", "/rent", "/tasks", "/media"];
+
+function isAgentAllowedPath(pathname: string) {
+  return agentAllowedPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 export async function middleware(request: NextRequest) {
@@ -65,6 +72,22 @@ export async function middleware(request: NextRequest) {
     redirectUrl.pathname = "/auth/sign-in";
     redirectUrl.searchParams.set("next", pathname);
     return NextResponse.redirect(redirectUrl);
+  }
+
+  if (!pathname.startsWith("/api")) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("user_id", data.user.id)
+      .maybeSingle();
+
+    const role = String(profile?.role || "agent");
+    if (role === "agent" && !isAgentAllowedPath(pathname)) {
+      const redirectUrl = request.nextUrl.clone();
+      redirectUrl.pathname = "/sale";
+      redirectUrl.searchParams.delete("next");
+      return NextResponse.redirect(redirectUrl);
+    }
   }
 
   return response;

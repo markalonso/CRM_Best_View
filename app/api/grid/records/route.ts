@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { getRequestActor, hasRole, requireAdminActor } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from "@/services/hierarchy/hierarchy.service";
 import { deleteRecords } from "@/services/records/record-delete.service";
@@ -195,6 +195,9 @@ export async function GET(request: NextRequest) {
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+  if (actor.role === "agent" && type !== "sale" && type !== "rent") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   const hierarchyFamily = hierarchyFamilyByType[type];
   const effectiveFields = await fetchEffectiveFieldDefinitions({
@@ -409,10 +412,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  const { actor, errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
   const supabase = createSupabaseClient();
-  const actor = await getRequestActor(request);
-  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   const body = (await request.json()) as { type: GridType; record_id: string; field: string; value: unknown };
 
   if (!body.type || !body.record_id || !body.field) return NextResponse.json({ error: "Missing fields" }, { status: 400 });

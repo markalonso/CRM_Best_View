@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { forbiddenResponse, getRequestActor, requireAdminActor } from "@/services/auth/role.service";
 
 type RelatedType = "sale" | "rent" | "buyer" | "client" | "contact";
 
@@ -15,11 +15,16 @@ const relatedToRecordType: Record<RelatedType, "properties_sale" | "properties_r
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
   const actor = await getRequestActor(request);
+  if (!actor.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { searchParams } = new URL(request.url);
 
   const view = (searchParams.get("view") || "my") as "my" | "overdue" | "today" | "week" | "all";
   const relatedType = (searchParams.get("related_type") || "") as RelatedType | "";
   const relatedId = (searchParams.get("related_id") || "").trim();
+
+  if (actor.role === "agent" && relatedType && !["sale", "rent"].includes(relatedType)) {
+    return forbiddenResponse();
+  }
 
   let query = supabase
     .from("tasks")
@@ -30,6 +35,7 @@ export async function GET(request: NextRequest) {
 
   if (relatedType) query = query.eq("related_type", relatedType);
   if (relatedId) query = query.eq("related_id", relatedId);
+  if (actor.role === "agent") query = query.in("related_type", ["sale", "rent"]);
 
   const now = new Date();
   const startOfToday = new Date(now);
@@ -72,8 +78,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const { actor, errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
 
   const body = (await request.json()) as {
     related_type?: RelatedType;

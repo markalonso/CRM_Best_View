@@ -1,7 +1,7 @@
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getEnvSafe } from "@/lib/env";
 import { detectTypeAndLanguage, detectMultipleListings, extractByType, validateAndNormalize, ExtractionParseError } from "@/services/ai/intake-processing.service";
@@ -20,7 +20,8 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createSupabaseClient();
-    const actor = await getRequestActor(request);
+    const { actor, errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
     const key = actor.userId || request.headers.get("x-forwarded-for") || "anon";
     const rl = checkRateLimit(`ai:${key}`, 20, 60_000);
     if (!rl.allowed) return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });

@@ -18,6 +18,13 @@ export const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Integrations", href: "/integrations/sheets" }
 ];
 
+export const AGENT_SIDEBAR_ITEMS: NavItem[] = [
+  { label: "Sale", href: "/sale" },
+  { label: "Rent", href: "/rent" },
+  { label: "Media", href: "/media" },
+  { label: "Tasks", href: "/tasks" }
+];
+
 export const ADMIN_SIDEBAR_ITEMS: NavItem[] = [
   { label: "Hierarchy", href: "/admin/hierarchy" }
 ];

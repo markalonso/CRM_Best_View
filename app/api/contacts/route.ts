@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { normalizeContactPhone } from "@/services/contacts/contact-linking.service";
 
 export async function GET(request: NextRequest) {
+  const { errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
+
   const supabase = createSupabaseClient();
   const q = (new URL(request.url).searchParams.get("q") || "").trim();
 
@@ -19,8 +22,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const actor = await getRequestActor(request);
-  if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const { errorResponse } = await requireAdminActor(request);
+  if (errorResponse) return errorResponse;
 
   const body = (await request.json()) as { name?: string; phone?: string };
   const name = String(body.name || "").trim();

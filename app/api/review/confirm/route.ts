@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { confirmIntakeSession } from "@/services/intake/confirm-intake.service";
-import { getRequestActor, hasRole } from "@/services/auth/role.service";
+import { requireAdminActor } from "@/services/auth/role.service";
 import { writeAuditLog } from "@/services/audit/audit-log.service";
 
 const payloadSchema = z.object({
@@ -23,8 +23,8 @@ const payloadSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
-    const actor = await getRequestActor(request);
-    if (!hasRole(actor.role, "agent")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    const { actor, errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
     const payload = payloadSchema.parse(await request.json());
 
     if (!payload.intakeSessionId || !payload.type || payload.type === "other") {
