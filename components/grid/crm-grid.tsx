@@ -292,11 +292,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       seen.add(column.key);
       return true;
     });
-    const roleScoped = isAgentMode && (type === "sale" || type === "rent")
-      ? merged.filter((column) => ["code", "status", "source"].includes(column.key))
-      : merged;
-
-    return roleScoped
+    return merged
       .sort((a, b) => {
         const orderA = effectiveGridOrder[a.key] ?? 10_000 + (baseIndex.get(a.key) ?? 0);
         const orderB = effectiveGridOrder[b.key] ?? 10_000 + (baseIndex.get(b.key) ?? 0);
@@ -304,7 +300,7 @@ export function CRMGrid({ type }: { type: GridType }) {
       })
       .filter((column) => fieldVisibility[column.key] ?? true)
       .map((column) => ({ ...column, label: fieldLabels[column.key] || column.label }));
-  }, [type, dynamicColumns, fieldLabels, fieldVisibility, effectiveGridOrder, isAgentMode]);
+  }, [type, dynamicColumns, fieldLabels, fieldVisibility, effectiveGridOrder]);
 
   const columns = useMemo(() => {
     const map = new Map(availableColumns.map((c) => [c.key, c]));
