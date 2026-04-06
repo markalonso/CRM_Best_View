@@ -170,7 +170,20 @@ async function resolveHierarchyRecordIds(supabase: ReturnType<typeof createSupab
     .in("node_id", descendantIds)
     .not(linkColumn, "is", null);
 
-  if (linkError) throw new Error(linkError.message);
+  if (linkError) {
+    const isBuyerLegacyColumnMismatch = type === "buyer" && /buyer_id/i.test(linkError.message) && /column/i.test(linkError.message);
+    if (!isBuyerLegacyColumnMismatch) throw new Error(linkError.message);
+
+    const { data: legacyRows, error: legacyError } = await supabase
+      .from("record_hierarchy_links")
+      .select("record_id,record_type")
+      .in("node_id", descendantIds)
+      .eq("record_type", "buyer")
+      .not("record_id", "is", null);
+
+    if (legacyError) throw new Error(`${linkError.message} | legacy fallback failed: ${legacyError.message}`);
+    return (legacyRows || []).map((row) => String((row as Record<string, unknown>).record_id || "")).filter(Boolean);
+  }
 
   return (linkRows || []).map((row) => String((row as Record<string, unknown>)[linkColumn] || "")).filter(Boolean);
 }
@@ -196,9 +209,18 @@ export async function GET(request: NextRequest) {
   const traceBuyer = (step: string, detail?: string) => {
     if (type === "buyer") buyerDebug.push({ step, detail });
   };
+  traceBuyer("request_parsed", JSON.stringify({
+    type,
+    page,
+    pageSize,
+    sort: searchParams.get("sort") || "updated_at:desc",
+    hasFilters: Boolean(searchParams.get("filters")),
+    nodeId: hierarchyNodeId || null
+  }));
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+  traceBuyer("entry_selected", JSON.stringify({ table: entry.table, select: entry.select }));
   if (actor.role === "agent" && type !== "sale" && type !== "rent") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -369,6 +391,11 @@ export async function GET(request: NextRequest) {
     query = query.order("updated_at", { ascending: false, nullsFirst: false });
     traceBuyer("sort_fallback_applied", "updated_at:desc");
   }
+  traceBuyer("sort_resolved", JSON.stringify({
+    requested: sort.map((s) => `${s.field}:${s.ascending ? "asc" : "desc"}`),
+    allowed: Array.from(dbSortableColumns),
+    applied: validSortApplied
+  }));
 
   const from = (page - 1) * pageSize;
   const to = from + pageSize - 1;
@@ -388,9 +415,11 @@ export async function GET(request: NextRequest) {
     }
     return NextResponse.json({
       error: error.message,
-      step: type === "buyer" ? "base_query" : undefined
+      step: type === "buyer" ? "base_query" : undefined,
+      context: type === "buyer" ? { nodeId: hierarchyNodeId || null, filters, sort, buyerDebug } : undefined
     }, { status: 500 });
   }
+  traceBuyer("base_query_ok", `rows=${(data || []).length},count=${count || 0}`);
 
   const safeRows = ((data || []) as unknown) as Array<Record<string, unknown>>;
   const ids = safeRows.map((r) => String(r.id || ""));
@@ -410,6 +439,7 @@ export async function GET(request: NextRequest) {
   });
 
   let rows: Array<Record<string, unknown>> = safeRows.map((row) => ({ ...row, media_counts: mediaMap.get(String(row.id || "")) || { images: 0, videos: 0, documents: 0 } }));
+  traceBuyer("post_query_transform_started", `rows=${rows.length}`);
 
   const customGridFields = effectiveFields.filter((field) => field.storage_kind === "custom_value" && field.effective_grid_visible);
   if (customGridFields.length > 0 && ids.length > 0) {
@@ -430,6 +460,7 @@ export async function GET(request: NextRequest) {
         });
         return nextRow;
       });
+      traceBuyer("custom_field_hydration_ok", `customFields=${customGridFields.length}`);
     } catch {
       traceBuyer("custom_field_hydration_failed");
       if (type === "buyer") {
@@ -438,6 +469,7 @@ export async function GET(request: NextRequest) {
       // Keep base rows even if custom field hydration fails.
     }
   }
+  traceBuyer("response_ready", `rows=${rows.length},total=${count || 0}`);
 
   if (type === "client" && filters.has_active_listings) {
     const { data: saleLinks } = ids.length ? await supabase.from("properties_sale").select("client_id, status").in("client_id", ids) : { data: [] };
