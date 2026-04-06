@@ -200,19 +200,33 @@ export async function GET(request: NextRequest) {
   }
 
   const hierarchyFamily = hierarchyFamilyByType[type];
-  const effectiveFields = await fetchEffectiveFieldDefinitions({
-    family: hierarchyFamily,
-    nodeId: hierarchyNodeId || undefined
+  let effectiveFields = await fetchEffectiveFieldDefinitions({
+    family: hierarchyFamily
   });
 
   let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
 
   if (hierarchyNodeId) {
-    const recordIds = await resolveHierarchyRecordIds(supabase, type, hierarchyNodeId);
-    if (recordIds.length === 0) {
+    let recordIds: string[] = [];
+    let applyHierarchyFilter = false;
+    try {
+      effectiveFields = await fetchEffectiveFieldDefinitions({
+        family: hierarchyFamily,
+        nodeId: hierarchyNodeId
+      });
+      recordIds = await resolveHierarchyRecordIds(supabase, type, hierarchyNodeId);
+      applyHierarchyFilter = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown hierarchy error";
+      const isInvalidOrForeignNode = message.includes("Hierarchy node not found") || message.includes("does not match grid type");
+      if (!isInvalidOrForeignNode) {
+        return NextResponse.json({ error: message }, { status: 500 });
+      }
+    }
+    if (applyHierarchyFilter && recordIds.length === 0) {
       return NextResponse.json({ rows: [], total: 0, page, pageSize });
     }
-    query = query.in("id", recordIds);
+    if (applyHierarchyFilter) query = query.in("id", recordIds);
   }
 
   if (filters.search) {
@@ -348,22 +362,26 @@ export async function GET(request: NextRequest) {
 
   const customGridFields = effectiveFields.filter((field) => field.storage_kind === "custom_value" && field.effective_grid_visible);
   if (customGridFields.length > 0 && ids.length > 0) {
-    const valuesByRecordId = await fetchCustomFieldValuesForRecords({
-      family: hierarchyFamily,
-      recordIds: ids,
-      fieldDefinitionIds: customGridFields.map((field) => field.id)
-    });
-
-    const customFieldById = new Map(customGridFields.map((field) => [field.id, field.field_key]));
-    rows = rows.map((row) => {
-      const customValues = valuesByRecordId[String(row.id || "")] || {};
-      const nextRow = { ...row };
-      Object.entries(customValues).forEach(([fieldDefinitionId, value]) => {
-        const fieldKey = customFieldById.get(fieldDefinitionId);
-        if (fieldKey) nextRow[fieldKey] = value;
+    try {
+      const valuesByRecordId = await fetchCustomFieldValuesForRecords({
+        family: hierarchyFamily,
+        recordIds: ids,
+        fieldDefinitionIds: customGridFields.map((field) => field.id)
       });
-      return nextRow;
-    });
+
+      const customFieldById = new Map(customGridFields.map((field) => [field.id, field.field_key]));
+      rows = rows.map((row) => {
+        const customValues = valuesByRecordId[String(row.id || "")] || {};
+        const nextRow = { ...row };
+        Object.entries(customValues).forEach(([fieldDefinitionId, value]) => {
+          const fieldKey = customFieldById.get(fieldDefinitionId);
+          if (fieldKey) nextRow[fieldKey] = value;
+        });
+        return nextRow;
+      });
+    } catch {
+      // Keep base rows even if custom field hydration fails.
+    }
   }
 
   if (type === "client" && filters.has_active_listings) {
