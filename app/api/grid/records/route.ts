@@ -192,6 +192,10 @@ export async function GET(request: NextRequest) {
   const sort = parseSort(searchParams.get("sort") || "updated_at:desc");
   const filters = parseFilters(searchParams.get("filters"));
   const hierarchyNodeId = String(searchParams.get("nodeId") || "").trim();
+  const buyerDebug: Array<{ step: string; detail?: string }> = [];
+  const traceBuyer = (step: string, detail?: string) => {
+    if (type === "buyer") buyerDebug.push({ step, detail });
+  };
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
@@ -200,9 +204,20 @@ export async function GET(request: NextRequest) {
   }
 
   const hierarchyFamily = hierarchyFamilyByType[type];
-  let effectiveFields = await fetchEffectiveFieldDefinitions({
-    family: hierarchyFamily
-  });
+  let effectiveFields: Awaited<ReturnType<typeof fetchEffectiveFieldDefinitions>> = [];
+  try {
+    effectiveFields = await fetchEffectiveFieldDefinitions({
+      family: hierarchyFamily
+    });
+    traceBuyer("effective_fields_family_resolved", `count=${effectiveFields.length}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown effective field error";
+    traceBuyer("effective_fields_family_failed", message);
+    if (type === "buyer") {
+      console.error("[grid/records][buyer] effective field resolution failed", { hierarchyNodeId, message });
+    }
+    return NextResponse.json({ error: message, step: type === "buyer" ? "effective_fields_family" : undefined }, { status: 500 });
+  }
 
   let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
 
@@ -214,13 +229,19 @@ export async function GET(request: NextRequest) {
         family: hierarchyFamily,
         nodeId: hierarchyNodeId
       });
+      traceBuyer("effective_fields_node_resolved", `count=${effectiveFields.length}`);
       recordIds = await resolveHierarchyRecordIds(supabase, type, hierarchyNodeId);
+      traceBuyer("hierarchy_record_ids_resolved", `count=${recordIds.length}`);
       applyHierarchyFilter = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown hierarchy error";
       const isInvalidOrForeignNode = message.includes("Hierarchy node not found") || message.includes("does not match grid type");
+      traceBuyer("hierarchy_resolution_failed", message);
       if (!isInvalidOrForeignNode) {
-        return NextResponse.json({ error: message }, { status: 500 });
+        if (type === "buyer") {
+          console.error("[grid/records][buyer] hierarchy resolution failed", { hierarchyNodeId, message });
+        }
+        return NextResponse.json({ error: message, step: type === "buyer" ? "hierarchy_resolution" : undefined }, { status: 500 });
       }
     }
     if (applyHierarchyFilter && recordIds.length === 0) {
@@ -328,9 +349,26 @@ export async function GET(request: NextRequest) {
     if (filters.preset === "brokers") query = query.eq("role", "broker");
   }
 
+  const dbSortableColumns = new Set<string>(entry.select.split(",").map((column) => column.trim()).filter(Boolean));
+  effectiveFields
+    .filter((field) => field.storage_kind === "core_column" && field.effective_sortable && field.core_column_name)
+    .forEach((field) => {
+      dbSortableColumns.add(String(field.core_column_name));
+    });
+
+  let validSortApplied = false;
   sort.forEach((s) => {
+    if (!dbSortableColumns.has(s.field)) {
+      traceBuyer("sort_field_skipped", s.field);
+      return;
+    }
+    validSortApplied = true;
     query = query.order(s.field, { ascending: s.ascending, nullsFirst: false });
   });
+  if (!validSortApplied) {
+    query = query.order("updated_at", { ascending: false, nullsFirst: false });
+    traceBuyer("sort_fallback_applied", "updated_at:desc");
+  }
 
   const from = (page - 1) * pageSize;
   const to = from + pageSize - 1;
@@ -338,7 +376,20 @@ export async function GET(request: NextRequest) {
   const { data, count, error } = await query.range(from, to);
   if (error) {
     if (error.code === "42501") return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    if (type === "buyer") {
+      console.error("[grid/records][buyer] base query failed", {
+        hierarchyNodeId,
+        error: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        buyerDebug
+      });
+    }
+    return NextResponse.json({
+      error: error.message,
+      step: type === "buyer" ? "base_query" : undefined
+    }, { status: 500 });
   }
 
   const safeRows = ((data || []) as unknown) as Array<Record<string, unknown>>;
@@ -380,6 +431,10 @@ export async function GET(request: NextRequest) {
         return nextRow;
       });
     } catch {
+      traceBuyer("custom_field_hydration_failed");
+      if (type === "buyer") {
+        console.error("[grid/records][buyer] custom field hydration failed", { hierarchyNodeId, buyerDebug });
+      }
       // Keep base rows even if custom field hydration fails.
     }
   }
