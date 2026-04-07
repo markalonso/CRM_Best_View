@@ -7,6 +7,7 @@ import { fetchCustomFieldValuesForRecords, fetchEffectiveFieldDefinitions } from
 import { deleteRecords } from "@/services/records/record-delete.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
+type ArchiveScope = "active" | "archived" | "all";
 
 type Range = { min?: string; max?: string };
 type GridFilters = {
@@ -192,6 +193,11 @@ export async function GET(request: NextRequest) {
   const sort = parseSort(searchParams.get("sort") || "updated_at:desc");
   const filters = parseFilters(searchParams.get("filters"));
   const hierarchyNodeId = String(searchParams.get("nodeId") || "").trim();
+  const archiveScopeRaw = String(searchParams.get("archiveScope") || "active").trim().toLowerCase();
+  if (archiveScopeRaw !== "active" && archiveScopeRaw !== "archived" && archiveScopeRaw !== "all") {
+    return NextResponse.json({ error: "Invalid archiveScope. Expected active, archived, or all." }, { status: 400 });
+  }
+  const archiveScope = archiveScopeRaw as ArchiveScope;
 
   const entry = map[type];
   if (!entry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
@@ -206,6 +212,8 @@ export async function GET(request: NextRequest) {
   });
 
   let query = supabase.from(entry.table).select(entry.select, { count: "exact" });
+  if (archiveScope === "active") query = query.eq("is_archived", false);
+  if (archiveScope === "archived") query = query.eq("is_archived", true);
 
   if (hierarchyNodeId) {
     const recordIds = await resolveHierarchyRecordIds(supabase, type, hierarchyNodeId);
@@ -428,6 +436,17 @@ export async function PATCH(request: NextRequest) {
 
   const patchEntry = map[body.type];
   if (!patchEntry) return NextResponse.json({ error: "Unsupported type" }, { status: 400 });
+
+  const { data: archiveState, error: archiveStateError } = await supabase
+    .from(patchEntry.table)
+    .select("id,is_archived")
+    .eq("id", body.record_id)
+    .maybeSingle();
+  if (archiveStateError) return NextResponse.json({ error: archiveStateError.message }, { status: 500 });
+  if (!archiveState) return NextResponse.json({ error: "Record not found" }, { status: 404 });
+  if (archiveState.is_archived) {
+    return NextResponse.json({ error: "Archived records are read-only. Unarchive first." }, { status: 409 });
+  }
 
   const { data: before } = await supabase.from(patchEntry.table).select("*").eq("id", body.record_id).maybeSingle();
   const { error } = await supabase.from(patchEntry.table).update({ [body.field]: value }).eq("id", body.record_id);

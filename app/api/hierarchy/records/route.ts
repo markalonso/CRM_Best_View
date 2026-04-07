@@ -13,6 +13,7 @@ export async function GET(request: NextRequest) {
     const query = nodeRecordsQuerySchema.parse({
       nodeId: searchParams.get("nodeId"),
       family: searchParams.get("family"),
+      archiveScope: searchParams.get("archiveScope") ?? "active",
       includeDescendants: searchParams.get("includeDescendants") ?? "true",
       limit: searchParams.get("limit") ?? "50"
     });

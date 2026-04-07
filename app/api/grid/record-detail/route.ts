@@ -216,6 +216,17 @@ export async function PATCH(request: NextRequest) {
   if (!map[body.type] || !body.id || !body.action) return NextResponse.json({ error: "Invalid params" }, { status: 400 });
 
   const supabase = createSupabaseClient();
+  const { data: recordState, error: recordStateError } = await supabase
+    .from(map[body.type].table)
+    .select("id,is_archived")
+    .eq("id", body.id)
+    .maybeSingle();
+  if (recordStateError) return NextResponse.json({ error: recordStateError.message }, { status: 500 });
+  if (!recordState) return NextResponse.json({ error: "Record not found" }, { status: 404 });
+  if (recordState.is_archived) {
+    return NextResponse.json({ error: "Archived records are read-only. Unarchive first." }, { status: 409 });
+  }
+
   let contactId = "";
 
   if (body.action === "link_existing_contact") {

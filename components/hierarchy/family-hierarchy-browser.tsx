@@ -53,6 +53,7 @@ export function FamilyHierarchyBrowser({ family, title, description, activeOnly 
   const [createOpen, setCreateOpen] = useState(false);
 
   const selectedNodeId = searchParams.get("nodeId") || "";
+  const archiveScope = (searchParams.get("archiveScope") || "active").toLowerCase();
 
   const loadTree = useCallback(async () => {
     setLoading(true);
@@ -97,6 +98,14 @@ export function FamilyHierarchyBrowser({ family, title, description, activeOnly 
     router.replace(next.toString() ? `${pathname}?${next.toString()}` : pathname, { scroll: false });
   }
 
+  function updateArchive(scope: "active" | "archived", options?: { keepNode?: boolean }) {
+    const next = new URLSearchParams(searchParams.toString());
+    if (scope === "active") next.delete("archiveScope");
+    else next.set("archiveScope", scope);
+    if (!options?.keepNode) next.delete("nodeId");
+    router.replace(next.toString() ? `${pathname}?${next.toString()}` : pathname, { scroll: false });
+  }
+
   async function handleNodeCreated(nodeId?: string) {
     await loadTree();
     if (nodeId) updateNode(nodeId);
@@ -130,6 +139,29 @@ export function FamilyHierarchyBrowser({ family, title, description, activeOnly 
             >
               All records
             </button>
+            <button
+              type="button"
+              onClick={() => updateArchive("active", { keepNode: true })}
+              className={`rounded-lg border px-3 py-2 text-sm ${archiveScope === "active" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}
+            >
+              Active view
+            </button>
+            {selectedNode && (
+              <button
+                type="button"
+                onClick={() => updateArchive("archived", { keepNode: true })}
+                className={`rounded-lg border px-3 py-2 text-sm ${archiveScope === "archived" ? "border-amber-600 bg-amber-600 text-white" : "border-amber-300 text-amber-800 hover:bg-amber-50"}`}
+              >
+                Folder archive
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => updateArchive("archived", { keepNode: false })}
+              className="rounded-lg border border-amber-300 px-3 py-2 text-sm text-amber-800 hover:bg-amber-50"
+            >
+              Family archive
+            </button>
           </div>
         </div>
 
@@ -153,8 +185,8 @@ export function FamilyHierarchyBrowser({ family, title, description, activeOnly 
           </div>
           <p className="mt-3 text-sm text-slate-600">
             {selectedNode
-              ? `Browsing ${selectedNode.path_text}. The records grid stays filtered to this branch and its descendants.`
-              : `Browsing all ${title.toLowerCase()} records. Use the folders below to drill into a specific hierarchy layer.`}
+              ? `Browsing ${selectedNode.path_text}. The records grid stays filtered to this branch and its descendants${archiveScope === "archived" ? " in archive mode" : ""}.`
+              : `Browsing all ${title.toLowerCase()} records${archiveScope === "archived" ? " in family archive mode" : ""}. Use the folders below to drill into a specific hierarchy layer.`}
           </p>
           {isAdmin && !authLoading && (
             <p className="mt-2 text-xs text-slate-500">

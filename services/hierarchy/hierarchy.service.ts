@@ -625,6 +625,7 @@ export async function moveHierarchyNode(nodeId: string, newParentId: string | nu
 export async function fetchRecordsByNode(input: {
   nodeId: string;
   family: CRMRecordFamily;
+  archiveScope?: "active" | "archived" | "all";
   includeDescendants?: boolean;
   limit?: number;
 }) {
@@ -645,11 +646,17 @@ export async function fetchRecordsByNode(input: {
   const recordIds = linkRows.map((row) => String(row[recordColumn] || "")).filter(Boolean);
   if (recordIds.length === 0) return [];
 
-  const { data: rows, error } = await supabase
+  let rowsQuery = supabase
     .from(recordTableByFamily[input.family])
     .select("*")
     .in("id", recordIds)
     .limit(input.limit ?? 50);
+
+  const archiveScope = input.archiveScope ?? "active";
+  if (archiveScope === "active") rowsQuery = rowsQuery.eq("is_archived", false);
+  if (archiveScope === "archived") rowsQuery = rowsQuery.eq("is_archived", true);
+
+  const { data: rows, error } = await rowsQuery;
 
   if (error) throw new Error(error.message);
 

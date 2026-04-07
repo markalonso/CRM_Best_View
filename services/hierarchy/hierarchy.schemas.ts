@@ -88,6 +88,7 @@ export const createHierarchyDestinationSchema = z.object({
 export const nodeRecordsQuerySchema = z.object({
   nodeId: z.string().uuid(),
   family: recordFamilySchema,
+  archiveScope: z.enum(["active", "archived", "all"]).optional().default("active"),
   includeDescendants: z.coerce.boolean().optional().default(true),
   limit: z.coerce.number().int().min(1).max(200).optional().default(50)
 });
