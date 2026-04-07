@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ConfirmationModal } from "@/components/ui/confirmation-modal";
 import { useAuth } from "@/hooks/use-auth";
 import { fetchFieldDefinitionsApi } from "@/services/api/hierarchy-api.service";
 
 type GridType = "sale" | "rent" | "buyer" | "client";
+type ArchiveScope = "active" | "archived" | "all";
 
 type GridColumn = {
   key: string;
@@ -224,6 +225,7 @@ function csvEscape(value: unknown) {
 
 export function CRMGrid({ type }: { type: GridType }) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const { user } = useAuth();
   const role = user?.role || "viewer";
@@ -281,6 +283,12 @@ export function CRMGrid({ type }: { type: GridType }) {
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const hierarchyNodeId = searchParams.get("nodeId") || "";
+  const archiveScopeParam = (searchParams.get("archiveScope") || "active").toLowerCase();
+  const archiveScope: ArchiveScope =
+    archiveScopeParam === "archived" || archiveScopeParam === "all"
+      ? (archiveScopeParam as ArchiveScope)
+      : "active";
+  const isArchivedView = archiveScope === "archived";
   const showSelection = !isViewer;
   const tableExtraColumns = showSelection ? 4 : 3;
 
@@ -312,6 +320,24 @@ export function CRMGrid({ type }: { type: GridType }) {
     () => Object.entries(selectedRows).filter(([, selected]) => selected).map(([recordId]) => recordId),
     [selectedRows]
   );
+  const isDrawerRecordArchived = Boolean(drawer.data?.record?.is_archived);
+
+  function updateUrlQuery(patch: Record<string, string | null>) {
+    const next = new URLSearchParams(searchParams.toString());
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value === null || value === "") next.delete(key);
+      else next.set(key, value);
+    });
+    const queryString = next.toString();
+    router.replace(queryString ? `${pathname}?${queryString}` : pathname, { scroll: false });
+  }
+
+  function setArchiveScope(scope: ArchiveScope, options?: { clearNode?: boolean }) {
+    updateUrlQuery({
+      archiveScope: scope === "active" ? null : scope,
+      nodeId: options?.clearNode ? null : hierarchyNodeId || null
+    });
+  }
 
   async function loadRows(reset = false) {
     setLoading(true);
@@ -320,7 +346,8 @@ export function CRMGrid({ type }: { type: GridType }) {
       page: String(reset ? 1 : page),
       pageSize: String(pageSize),
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
-      filters: JSON.stringify(filters)
+      filters: JSON.stringify(filters),
+      archiveScope
     });
     if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
 
@@ -356,7 +383,7 @@ export function CRMGrid({ type }: { type: GridType }) {
     setFeedback(null);
     loadRows(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, sorts, filters, hierarchyNodeId]);
+  }, [type, sorts, filters, hierarchyNodeId, archiveScope]);
 
   useEffect(() => {
     if (!infinite) return;
@@ -494,11 +521,11 @@ export function CRMGrid({ type }: { type: GridType }) {
 
     return (
       <button
-        onClick={(e) => {
-          e.stopPropagation();
-          if (col.editable && !isViewer) setEditing({ rowId: row.id, key: col.key, value });
+          onClick={(e) => {
+            e.stopPropagation();
+          if (col.editable && !isViewer && !isArchivedView) setEditing({ rowId: row.id, key: col.key, value });
         }}
-        className={`w-full text-left text-xs ${col.editable && !isViewer ? "hover:underline" : ""}`}
+        className={`w-full text-left text-xs ${col.editable && !isViewer && !isArchivedView ? "hover:underline" : ""}`}
       >
         {value || "-"}
       </button>
@@ -535,7 +562,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   }
 
   async function linkContact(contactId: string) {
-    if (!drawer.data?.record?.id) return;
+    if (!drawer.data?.record?.id || isDrawerRecordArchived) return;
     const res = await fetch("/api/grid/record-detail", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -549,7 +576,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   }
 
   async function createContactFromDrawer() {
-    if (!drawer.data?.record?.id) return;
+    if (!drawer.data?.record?.id || isDrawerRecordArchived) return;
     const name = window.prompt("Contact name") || "";
     const phone = window.prompt("Contact phone (optional)") || "";
     const res = await fetch("/api/grid/record-detail", {
@@ -570,7 +597,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   }
 
   async function createTask(relatedType: "sale" | "rent" | "buyer" | "client" | "contact", relatedId: string) {
-    if (isViewer || !taskTitle.trim() || !relatedId) return;
+    if (isViewer || isDrawerRecordArchived || !taskTitle.trim() || !relatedId) return;
     const res = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -601,7 +628,7 @@ export function CRMGrid({ type }: { type: GridType }) {
   }
 
   async function updateTask(taskId: string, updates: Record<string, unknown>) {
-    if (isViewer) return;
+    if (isViewer || isDrawerRecordArchived) return;
     const res = await fetch(`/api/tasks/${taskId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -675,7 +702,8 @@ export function CRMGrid({ type }: { type: GridType }) {
       page: "1",
       pageSize: "3000",
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
-      filters: JSON.stringify(filters)
+      filters: JSON.stringify(filters),
+      archiveScope
     });
     if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
     const res = await fetch(`/api/grid/records?${query.toString()}`, { cache: "no-store" });
@@ -724,7 +752,8 @@ export function CRMGrid({ type }: { type: GridType }) {
       page: "1",
       pageSize: "3000",
       sort: sorts.map((s) => `${s.field}:${s.direction}`).join(","),
-      filters: JSON.stringify(currentOnly ? filters : {})
+      filters: JSON.stringify(currentOnly ? filters : {}),
+      archiveScope
     });
     if (hierarchyNodeId) query.set("nodeId", hierarchyNodeId);
 
@@ -838,6 +867,44 @@ ${exportData.spreadsheetUrl || ""}`);
     }
   }
 
+  async function archiveSelected(archived: boolean) {
+    if (!isAdmin || selectedRecordIds.length === 0) return;
+    if (!window.confirm(archived ? "Archive selected records?" : "Unarchive selected records?")) return;
+    setFeedback(null);
+    try {
+      const res = await fetch("/api/grid/records/archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, recordIds: selectedRecordIds, archived })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update archive state");
+      const updatedCount = (data.updatedRecordIds || []).length || selectedRecordIds.length;
+      if ((data.updatedRecordIds || []).length === 0) {
+        setFeedback({
+          tone: "success",
+          message: archived
+            ? "Selected records are already archived."
+            : "Selected records are already active."
+        });
+        setSelectedRows({});
+        await loadRows(true);
+        return;
+      }
+      setSelectedRows({});
+      setPage(1);
+      await loadRows(true);
+      setFeedback({
+        tone: "success",
+        message: archived
+          ? `Archived ${updatedCount} record(s).`
+          : `Unarchived ${updatedCount} record(s).`
+      });
+    } catch (error) {
+      setFeedback({ tone: "error", message: error instanceof Error ? error.message : "Failed to update archive state" });
+    }
+  }
+
   return (
     <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm">
       {(
@@ -849,6 +916,15 @@ ${exportData.spreadsheetUrl || ""}`);
             className="h-9 flex-1 rounded border border-slate-300 px-3 text-sm"
           />
           <button onClick={() => setShowFilters(true)} className="rounded border border-slate-300 px-3 py-1.5 text-sm">Filters</button>
+          <div className="ml-1 flex items-center gap-1 rounded border border-slate-300 p-0.5 text-xs">
+            <button onClick={() => setArchiveScope("active")} className={`rounded px-2 py-1 ${archiveScope === "active" ? "bg-slate-900 text-white" : "text-slate-700"}`}>Active</button>
+            <button onClick={() => setArchiveScope("archived")} className={`rounded px-2 py-1 ${archiveScope === "archived" ? "bg-slate-900 text-white" : "text-slate-700"}`}>Archive</button>
+            {hierarchyNodeId && (
+              <button onClick={() => setArchiveScope("archived", { clearNode: true })} className="rounded px-2 py-1 text-slate-700">
+                Family Archive
+              </button>
+            )}
+          </div>
 
           <select value={selectedViewId} onChange={(e) => applyView(e.target.value)} className="rounded border border-slate-300 px-2 py-1.5 text-sm">
             <option value="">Views</option>
@@ -866,6 +942,8 @@ ${exportData.spreadsheetUrl || ""}`);
         <div className="flex items-center gap-2 text-sm font-semibold">
           <span className="uppercase">{type}</span>
           <span className="text-xs text-slate-500">{total} records</span>
+          {archiveScope === "archived" && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-800">Archive view</span>}
+          {archiveScope === "all" && <span className="rounded bg-blue-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-blue-800">All records</span>}
           {isViewer && <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">Read only</span>}
         </div>
         <div className="flex items-center gap-2">
@@ -894,6 +972,16 @@ ${exportData.spreadsheetUrl || ""}`);
           <span>{selectedCount} selected</span>
           <button className="rounded border border-slate-300 px-2 py-1">Bulk set Active</button>
           <button className="rounded border border-slate-300 px-2 py-1">Bulk set Needs Review</button>
+          {isAdmin && !isArchivedView && (
+            <button onClick={() => archiveSelected(true)} className="rounded border border-amber-300 px-2 py-1 font-medium text-amber-800 hover:bg-amber-50">
+              Add to archive
+            </button>
+          )}
+          {isAdmin && isArchivedView && (
+            <button onClick={() => archiveSelected(false)} className="rounded border border-emerald-300 px-2 py-1 font-medium text-emerald-700 hover:bg-emerald-50">
+              Unarchive selected
+            </button>
+          )}
           {isAdmin && (
             <button onClick={openDeleteModal} className="rounded border border-rose-300 px-2 py-1 font-medium text-rose-700 hover:bg-rose-50">
               Delete selected
@@ -1247,7 +1335,12 @@ ${exportData.spreadsheetUrl || ""}`);
                 </div>
               ) : (
                 <div className="space-y-4 text-sm">
-                <div className="rounded border border-slate-200 p-3">
+                  {isDrawerRecordArchived && (
+                    <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      This record is archived and read-only. Unarchive it before editing tasks, contacts, or record details.
+                    </div>
+                  )}
+                  <div className="rounded border border-slate-200 p-3">
                   <h4 className="mb-2 font-semibold">{isViewer ? "Record fields" : "Editable fields"}</h4>
                   {drawer.data.last_edited && (
                     <p className="mb-2 text-xs text-slate-500">Edited by {drawer.data.last_edited.by || "System"} at {relTime(drawer.data.last_edited.at)}</p>
@@ -1267,14 +1360,14 @@ ${exportData.spreadsheetUrl || ""}`);
                             return (
                               <div key={field.id} className="grid grid-cols-[120px_1fr] gap-2">
                                 <span className="text-xs text-slate-500">{field.effective_label}</span>
-                                <input defaultValue={displayValue} readOnly={isViewer} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                                <input defaultValue={displayValue} readOnly={isViewer || isDrawerRecordArchived} className="rounded border border-slate-300 px-2 py-1 text-xs" />
                               </div>
                             );
                           })
                       : Object.entries(drawer.data.record || {}).slice(0, 12).map(([k, v]) => (
                           <div key={k} className="grid grid-cols-[120px_1fr] gap-2">
                             <span className="text-xs text-slate-500">{k}</span>
-                            <input defaultValue={String(v ?? "")} readOnly={isViewer} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                            <input defaultValue={String(v ?? "")} readOnly={isViewer || isDrawerRecordArchived} className="rounded border border-slate-300 px-2 py-1 text-xs" />
                           </div>
                         ))}
                   </div>
@@ -1298,7 +1391,7 @@ ${exportData.spreadsheetUrl || ""}`);
                       ))}
                     </select>
                     <button
-                      disabled={isViewer}
+                      disabled={isViewer || isDrawerRecordArchived}
                       onClick={() => createTask(relatedTypeFromGridType(type), drawer.data.record?.id)}
                       className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
                     >
@@ -1315,14 +1408,15 @@ ${exportData.spreadsheetUrl || ""}`);
                         </div>
                         <p className="text-slate-500">Assigned: {task.assigned_to_name || "Unassigned"} • Due: {task.due_date ? relTime(task.due_date) : "-"}</p>
                         <div className="mt-2 flex flex-wrap gap-2">
-                          <button disabled={isViewer || task.status !== "open"} onClick={() => updateTask(task.id, { status: "done" })} className="rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Mark done</button>
+                          <button disabled={isViewer || isDrawerRecordArchived || task.status !== "open"} onClick={() => updateTask(task.id, { status: "done" })} className="rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Mark done</button>
                           <input
                             type="datetime-local"
                             defaultValue={task.due_date ? new Date(task.due_date).toISOString().slice(0, 16) : ""}
                             onBlur={(e) => updateTask(task.id, { due_date: e.target.value || null })}
+                            disabled={isViewer || isDrawerRecordArchived}
                             className="rounded border border-slate-300 px-2 py-1 text-[10px]"
                           />
-                          <select defaultValue={task.assigned_to || ""} onChange={(e) => updateTask(task.id, { assigned_to: e.target.value || null })} className="rounded border border-slate-300 px-2 py-1 text-[10px]">
+                          <select defaultValue={task.assigned_to || ""} onChange={(e) => updateTask(task.id, { assigned_to: e.target.value || null })} disabled={isViewer || isDrawerRecordArchived} className="rounded border border-slate-300 px-2 py-1 text-[10px]">
                             <option value="">Unassigned</option>
                             {(drawer.data.assignees || []).map((u: any) => (
                               <option key={u.id} value={u.id}>{u.name}</option>
@@ -1337,7 +1431,7 @@ ${exportData.spreadsheetUrl || ""}`);
                   {drawer.data.linked_contact?.id && (
                     <div className="mt-3 border-t border-slate-200 pt-3">
                       <p className="mb-2 text-xs font-semibold text-slate-600">Contact tasks</p>
-                      <button disabled={isViewer} onClick={() => createTask("contact", drawer.data.linked_contact.id)} className="mb-2 rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Add task to linked contact</button>
+                      <button disabled={isViewer || isDrawerRecordArchived} onClick={() => createTask("contact", drawer.data.linked_contact.id)} className="mb-2 rounded border border-slate-300 px-2 py-1 text-[10px] disabled:opacity-40">Add task to linked contact</button>
                       <div className="space-y-1">
                         {(drawer.data.contact_tasks || []).map((task: any) => (
                           <div key={task.id} className="rounded border border-slate-200 p-2 text-[10px]">
@@ -1379,13 +1473,13 @@ ${exportData.spreadsheetUrl || ""}`);
 
                   <div className="mb-2 space-y-1">
                     {contactMatches.map((contact) => (
-                      <button disabled={isViewer} key={contact.id} onClick={() => linkContact(contact.id)} className="block w-full rounded border border-slate-200 px-2 py-1 text-left text-xs hover:bg-slate-50 disabled:opacity-40">
+                      <button disabled={isViewer || isDrawerRecordArchived} key={contact.id} onClick={() => linkContact(contact.id)} className="block w-full rounded border border-slate-200 px-2 py-1 text-left text-xs hover:bg-slate-50 disabled:opacity-40">
                         {contact.name || "Contact"} • {contact.phone || "No phone"}
                       </button>
                     ))}
                   </div>
 
-                  <button disabled={isViewer} onClick={createContactFromDrawer} className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40">Create new contact manually</button>
+                  <button disabled={isViewer || isDrawerRecordArchived} onClick={createContactFromDrawer} className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40">Create new contact manually</button>
                 </div>
 
                 {Array.isArray(drawer.data.linked_records) && drawer.data.linked_records.length > 0 && (

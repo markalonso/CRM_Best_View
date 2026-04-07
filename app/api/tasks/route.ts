@@ -12,6 +12,22 @@ const relatedToRecordType: Record<RelatedType, "properties_sale" | "properties_r
   contact: "contacts"
 };
 
+async function isContactLinkedToArchivedRecords(supabase: ReturnType<typeof createSupabaseClient>, contactId: string) {
+  const [sale, rent, buyers, clients] = await Promise.all([
+    supabase.from("properties_sale").select("id", { count: "exact", head: true }).eq("contact_id", contactId).eq("is_archived", true),
+    supabase.from("properties_rent").select("id", { count: "exact", head: true }).eq("contact_id", contactId).eq("is_archived", true),
+    supabase.from("buyers").select("id", { count: "exact", head: true }).eq("contact_id", contactId).eq("is_archived", true),
+    supabase.from("clients").select("id", { count: "exact", head: true }).eq("contact_id", contactId).eq("is_archived", true)
+  ]);
+
+  if (sale.error) throw new Error(sale.error.message);
+  if (rent.error) throw new Error(rent.error.message);
+  if (buyers.error) throw new Error(buyers.error.message);
+  if (clients.error) throw new Error(clients.error.message);
+
+  return (sale.count || 0) + (rent.count || 0) + (buyers.count || 0) + (clients.count || 0) > 0;
+}
+
 export async function GET(request: NextRequest) {
   const supabase = createSupabaseClient();
   const actor = await getRequestActor(request);
@@ -97,6 +113,26 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = createSupabaseClient();
+  if (relatedType !== "contact") {
+    const recordTable = relatedToRecordType[relatedType];
+    const { data: recordState, error: recordStateError } = await supabase
+      .from(recordTable)
+      .select("id,is_archived")
+      .eq("id", relatedId)
+      .maybeSingle();
+
+    if (recordStateError) return NextResponse.json({ error: recordStateError.message }, { status: 500 });
+    if (!recordState) return NextResponse.json({ error: "Related record not found" }, { status: 404 });
+    if (recordState.is_archived) {
+      return NextResponse.json({ error: "Cannot mutate tasks for archived records. Unarchive first." }, { status: 409 });
+    }
+  } else {
+    const contactLinkedToArchived = await isContactLinkedToArchivedRecords(supabase, relatedId);
+    if (contactLinkedToArchived) {
+      return NextResponse.json({ error: "Cannot mutate contact tasks while this contact is linked to archived records. Unarchive those records first." }, { status: 409 });
+    }
+  }
+
   const payload = {
     related_type: relatedType,
     related_id: relatedId,
