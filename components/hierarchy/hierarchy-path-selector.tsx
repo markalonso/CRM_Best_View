@@ -18,6 +18,7 @@ type Props = {
   canCreate: boolean;
   disabled?: boolean;
   onChange: (nodeId: string) => void;
+  onSelectionChange?: (node: HierarchyNode | null) => void;
 };
 
 function reviewTypeToFamily(reviewType: ReviewType): IntakeHierarchyFamily | null {
@@ -63,6 +64,8 @@ function TreeOption({
   selectedNodeId,
   parentNodeId,
   canCreate,
+  expandedNodeIds,
+  onToggleExpand,
   onBrowse,
   onSelectDestination
 }: {
@@ -71,22 +74,21 @@ function TreeOption({
   selectedNodeId: string;
   parentNodeId: string;
   canCreate: boolean;
+  expandedNodeIds: Set<string>;
+  onToggleExpand: (nodeId: string) => void;
   onBrowse: (node: HierarchyNode) => void;
   onSelectDestination: (node: HierarchyNode) => void;
 }) {
   const isSelected = node.id === selectedNodeId;
   const isParent = node.id === parentNodeId;
   const selectable = allowedNodeIds.has(node.id);
+  const hasChildren = node.children.length > 0;
+  const expanded = expandedNodeIds.has(node.id);
 
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => {
-          onBrowse(node);
-          if (selectable) onSelectDestination(node);
-        }}
-        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${
+      <div
+        className={`flex w-full items-center gap-2 rounded-lg border px-2 py-2 transition ${
           isSelected
             ? "border-slate-900 bg-slate-900 text-white"
             : isParent
@@ -95,27 +97,48 @@ function TreeOption({
         }`}
         style={{ paddingLeft: `${node.depth * 16 + 12}px` }}
       >
-        <div className="min-w-0">
+        {hasChildren ? (
+          <button
+            type="button"
+            onClick={() => onToggleExpand(node.id)}
+            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-[10px] font-semibold ${isSelected ? "border-white/60 text-white" : "border-slate-300 text-slate-500"}`}
+            aria-label={expanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
+          >
+            {expanded ? "−" : "+"}
+          </button>
+        ) : (
+          <span className="inline-flex h-6 w-6 shrink-0" />
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            onBrowse(node);
+            if (selectable) onSelectDestination(node);
+          }}
+          className="flex min-w-0 flex-1 items-center justify-between text-left"
+        >
+          <div className="min-w-0">
           <p className="truncate font-medium">{node.name}</p>
           <p className={`truncate text-xs ${isSelected ? "text-white/80" : isParent ? "text-blue-700" : "text-slate-500"}`}>{node.path_text}</p>
-        </div>
-        <div className="ml-3 flex shrink-0 flex-wrap items-center justify-end gap-2">
-          <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${isSelected ? "bg-white/15 text-white" : "bg-slate-100 text-slate-600"}`}>
-            {node.node_kind}
-          </span>
-          {selectable ? (
-            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${isSelected ? "bg-emerald-200 text-emerald-950" : "bg-emerald-100 text-emerald-800"}`}>
-              save target
+          </div>
+          <div className="ml-3 flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${isSelected ? "bg-white/15 text-white" : "bg-slate-100 text-slate-600"}`}>
+              {node.node_kind}
             </span>
-          ) : (
-            <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-              {canCreate ? "parent only" : "container only"}
-            </span>
-          )}
-          {isParent && !isSelected && canCreate && <span className="rounded bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-800">create here</span>}
-        </div>
-      </button>
-      {node.children.length > 0 && node.children.map((child) => (
+            {selectable ? (
+              <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${isSelected ? "bg-emerald-200 text-emerald-950" : "bg-emerald-100 text-emerald-800"}`}>
+                save target
+              </span>
+            ) : (
+              <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                {canCreate ? "parent only" : "container only"}
+              </span>
+            )}
+            {isParent && !isSelected && canCreate && <span className="rounded bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-800">create here</span>}
+          </div>
+        </button>
+      </div>
+      {hasChildren && expanded && node.children.map((child) => (
         <TreeOption
           key={child.id}
           node={child}
@@ -123,6 +146,8 @@ function TreeOption({
           selectedNodeId={selectedNodeId}
           parentNodeId={parentNodeId}
           canCreate={canCreate}
+          expandedNodeIds={expandedNodeIds}
+          onToggleExpand={onToggleExpand}
           onBrowse={onBrowse}
           onSelectDestination={onSelectDestination}
         />
@@ -131,7 +156,7 @@ function TreeOption({
   );
 }
 
-export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, disabled = false, onChange }: Props) {
+export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, disabled = false, onChange, onSelectionChange }: Props) {
   const family = reviewTypeToFamily(reviewType);
   const [tree, setTree] = useState<HierarchyTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
@@ -140,6 +165,7 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
   const [allowedNodeIds, setAllowedNodeIds] = useState<Set<string>>(new Set());
   const [browseNodeId, setBrowseNodeId] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(new Set());
 
   const visibleTree = useMemo(() => filterActiveTree(tree), [tree]);
   const flatNodes = useMemo(() => flattenTree(visibleTree), [visibleTree]);
@@ -215,6 +241,21 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
     }
     if (rootNode) setBrowseNodeId(rootNode.id);
   }, [browseNodeId, nodeById, rootNode, selectedNode]);
+
+  useEffect(() => {
+    if (!onSelectionChange) return;
+    onSelectionChange(selectedNode || null);
+  }, [onSelectionChange, selectedNode]);
+
+  useEffect(() => {
+    setExpandedNodeIds((prev) => {
+      const next = new Set(prev);
+      visibleTree.forEach((node) => next.add(node.id));
+      if (browseNodeId) next.add(browseNodeId);
+      if (selectedNodeId) next.add(selectedNodeId);
+      return next;
+    });
+  }, [browseNodeId, selectedNodeId, visibleTree]);
 
   if (!family) {
     return (
@@ -292,6 +333,15 @@ export function HierarchyPathSelector({ reviewType, selectedNodeId, canCreate, d
                       selectedNodeId={selectedNodeId}
                       parentNodeId={createParent?.id || ""}
                       canCreate={canCreate}
+                      expandedNodeIds={expandedNodeIds}
+                      onToggleExpand={(nodeId) => {
+                        setExpandedNodeIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(nodeId)) next.delete(nodeId);
+                          else next.add(nodeId);
+                          return next;
+                        });
+                      }}
                       onBrowse={(nextNode) => {
                         setBrowseNodeId(nextNode.id);
                         setNotice("");
