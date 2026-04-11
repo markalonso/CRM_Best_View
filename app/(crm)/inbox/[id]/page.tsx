@@ -6,7 +6,7 @@ import { MediaManager } from "@/components/media/media-manager";
 import { HierarchyPathSelector } from "@/components/hierarchy/hierarchy-path-selector";
 import { useAuth } from "@/hooks/use-auth";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   formatFieldValueForInput,
   isFieldValueEmpty,
@@ -14,10 +14,10 @@ import {
   resolveAiValueForField,
   reviewTypeToHierarchyFamily
 } from "@/lib/effective-fields";
-import type { EffectiveFieldDefinition } from "@/types/hierarchy";
+import type { EffectiveFieldDefinition, HierarchyNode } from "@/types/hierarchy";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
-type Mode = "create_new" | "update_existing";
+type Mode = "create_new" | "update_existing" | "";
 type MergeMode = "keep_existing" | "replace_with_new" | "append";
 type AiState = "idle" | "running" | "success" | "error";
 type QuickQuestionType = "text" | "number" | "select" | "multiselect" | "phone";
@@ -51,6 +51,11 @@ type SessionDetail = {
     hierarchy_node_id?: string | null;
     media_folder_name?: string | null;
     media_hierarchy_node_id?: string | null;
+    quick_question_state?: {
+      questionAnswers?: Record<string, string>;
+      skippedQuestions?: Record<string, boolean>;
+      updatedAt?: string;
+    };
     [k: string]: unknown;
   };
   completeness_score: number;
@@ -184,9 +189,12 @@ export default function IntakeReviewPage() {
 
   const [quickQuestions, setQuickQuestions] = useState<QuickQuestion[]>([]);
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
+  const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [skippedQuestions, setSkippedQuestions] = useState<Record<string, boolean>>({});
+  const quickQuestionPersistRef = useRef("");
 
-  const [mode, setMode] = useState<Mode>("create_new");
+  const [mode, setMode] = useState<Mode>("");
+  const [modeValidation, setModeValidation] = useState("");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<ExistingRow[]>([]);
   const [selectedRecordId, setSelectedRecordId] = useState<string>("");
@@ -203,16 +211,27 @@ export default function IntakeReviewPage() {
   const [customFieldDirty, setCustomFieldDirty] = useState<Record<string, boolean>>({});
   const [fieldValidationErrors, setFieldValidationErrors] = useState<FieldErrorMap>({});
   const [fieldLoadError, setFieldLoadError] = useState("");
+  const [selectedHierarchySummary, setSelectedHierarchySummary] = useState<{ name: string; path: string; nodeKind: string } | null>(null);
 
   const legacyFields = useMemo(() => {
     if (selectedType === "other") return [];
     return fieldConfig[selectedType];
   }, [selectedType]);
 
-  const hasRemainingCritical = useMemo(() => {
-    const remaining = (session?.ai_meta?.remaining_critical_missing || []) as string[];
-    return remaining.length > 0 || Object.values(skippedQuestions).some(Boolean);
-  }, [session?.ai_meta?.remaining_critical_missing, skippedQuestions]);
+  const criticalMissingKeys = useMemo(() => {
+    const remainingCritical = (session?.ai_meta?.remaining_critical_missing || []) as string[];
+    const missingFields = (session?.ai_meta?.missing_fields || []) as string[];
+    const source = remainingCritical.length > 0 ? remainingCritical : missingFields;
+    return source.map((value) => String(value));
+  }, [session?.ai_meta?.missing_fields, session?.ai_meta?.remaining_critical_missing]);
+  const hasRemainingCritical = useMemo(
+    () => criticalMissingKeys.some((key) => !questionAnswers[key] && !skippedQuestions[key]),
+    [criticalMissingKeys, questionAnswers, skippedQuestions]
+  );
+  const visibleQuickQuestions = useMemo(
+    () => quickQuestions.filter((question) => !skippedQuestions[question.key] && !questionAnswers[question.key]),
+    [quickQuestions, questionAnswers, skippedQuestions]
+  );
   const hasUploadedMedia = mediaCount > 0;
   const hierarchyFamily = useMemo(() => reviewTypeToHierarchyFamily(selectedType), [selectedType]);
   const intakeFields = useMemo(
@@ -258,6 +277,10 @@ export default function IntakeReviewPage() {
     setSession(nextSession);
     setQuickQuestions((data.quick_questions || []) as QuickQuestion[]);
     setMediaCount(Array.isArray(data.media) ? data.media.length : 0);
+    const hydratedAnswers = (nextSession.ai_meta?.quick_question_state?.questionAnswers || {}) as Record<string, string>;
+    setQuestionAnswers(hydratedAnswers);
+    setQuestionDrafts(hydratedAnswers);
+    setSkippedQuestions((nextSession.ai_meta?.quick_question_state?.skippedQuestions || {}) as Record<string, boolean>);
 
     const preselected = (nextSession.type_confirmed || nextSession.type_detected || "other") as ReviewType;
     setSelectedType(preselected);
@@ -299,6 +322,15 @@ export default function IntakeReviewPage() {
     }
     runSearch();
   }, [mode, selectedType, search]);
+
+  useEffect(() => {
+    if (mode !== "update_existing") {
+      setSearch("");
+      setResults([]);
+      setSelectedRecordId("");
+      setExistingRecord({});
+    }
+  }, [mode]);
 
   useEffect(() => {
     const defaults: Record<string, MergeMode> = {};
@@ -451,27 +483,129 @@ export default function IntakeReviewPage() {
     await loadSession();
   }
 
-  function applyQuestionAnswer(questionKey: string, value: string) {
-    const normalizedValue = questionKey.includes("phone") ? normalizePhone(value) : value;
-    setQuestionAnswers((prev) => ({ ...prev, [questionKey]: normalizedValue }));
-    setSkippedQuestions((prev) => ({ ...prev, [questionKey]: false }));
+  async function persistQuickQuestionState(nextAnswers: Record<string, string>, nextSkipped: Record<string, boolean>) {
+    if (!session?.id) return;
+    const snapshot = JSON.stringify({ questionAnswers: nextAnswers, skippedQuestions: nextSkipped });
+    if (quickQuestionPersistRef.current === snapshot) return;
+    quickQuestionPersistRef.current = snapshot;
+    await fetch(`/api/intake/${session.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        questionAnswers: nextAnswers,
+        skippedQuestions: nextSkipped
+      })
+    }).catch(() => null);
+  }
 
-    if (questionKey === "location_area") {
-      setDirtyFields((prev) => ({ ...prev, area: true }));
-      setForm((prev) => ({ ...prev, area: normalizedValue }));
+  function buildQuestionCommit(
+    questionKey: string,
+    value: string,
+    currentAnswers: Record<string, string>,
+    currentSkipped: Record<string, boolean>
+  ) {
+    const normalizedValue = questionKey.includes("phone") ? normalizePhone(value.trim()) : value.trim();
+    if (!normalizedValue) return null;
+    const nextAnswers = { ...currentAnswers, [questionKey]: normalizedValue };
+    const nextSkipped = { ...currentSkipped, [questionKey]: false };
+    const questionFieldAliases: Record<string, string[]> = {
+      location_area: ["area", "location_area"],
+      client_type: ["role", "client_type"],
+      contact_phone: ["phone", "contact_phone"],
+      preferred_areas: ["preferred_areas"],
+      budget_max: ["budget_max"],
+      budget_min: ["budget_min"],
+      price: ["price"],
+      phone: ["phone", "contact_phone"]
+    };
+
+    const candidates = questionFieldAliases[questionKey] || [questionKey];
+    const targetField = effectiveFields.find((field) => {
+      const key = fieldValueKey(field);
+      return candidates.includes(key) || candidates.includes(field.field_key);
+    });
+    const fallbackKey = candidates[0];
+    const targetKey = targetField ? fieldValueKey(targetField) : fallbackKey;
+
+    return { normalizedValue, nextAnswers, nextSkipped, targetField, targetKey };
+  }
+
+  function applyQuestionAnswer(questionKey: string, value: string, options?: { persist?: boolean }) {
+    const committed = buildQuestionCommit(questionKey, value, questionAnswers, skippedQuestions);
+    if (!committed) return;
+    const { normalizedValue, nextAnswers, nextSkipped, targetField, targetKey } = committed;
+    setQuestionAnswers(nextAnswers);
+    setQuestionDrafts((prev) => ({ ...prev, [questionKey]: normalizedValue }));
+    setSkippedQuestions(nextSkipped);
+    if (options?.persist !== false) {
+      void persistQuickQuestionState(nextAnswers, nextSkipped);
+    }
+
+    if (targetField?.storage_kind === "custom_value") {
+      setCustomFieldDirty((prev) => ({ ...prev, [targetField.field_key]: true }));
+      setCustomFieldValues((prev) => ({ ...prev, [targetField.field_key]: normalizedValue }));
       return;
     }
 
-    if (questionKey === "client_type") {
-      setDirtyFields((prev) => ({ ...prev, role: true }));
-      setForm((prev) => ({ ...prev, role: normalizedValue }));
-      return;
+    setDirtyFields((prev) => ({ ...prev, [targetKey]: true }));
+    setForm((prev) => ({ ...prev, [targetKey]: normalizedValue }));
+  }
+
+  function commitQuestionDraft(questionKey: string) {
+    const draftValue = questionDrafts[questionKey] || "";
+    applyQuestionAnswer(questionKey, draftValue);
+  }
+
+  function commitPendingQuestionDrafts() {
+    let nextAnswers = { ...questionAnswers };
+    let nextSkipped = { ...skippedQuestions };
+    let changed = false;
+    const coreUpdates: Record<string, string> = {};
+    const customUpdates: Record<string, string> = {};
+    const nextCustomDirty: Record<string, boolean> = {};
+    const nextDirty: Record<string, boolean> = {};
+
+    quickQuestions.forEach((question) => {
+      if (nextSkipped[question.key]) return;
+      const draft = (questionDrafts[question.key] || "").trim();
+      if (!draft) return;
+      const committed = buildQuestionCommit(question.key, draft, nextAnswers, nextSkipped);
+      if (!committed) return;
+      const { normalizedValue, nextAnswers: computedAnswers, nextSkipped: computedSkipped, targetField, targetKey } = committed;
+      if (nextAnswers[question.key] === normalizedValue && nextSkipped[question.key] === false) return;
+
+      nextAnswers = computedAnswers;
+      nextSkipped = computedSkipped;
+      if (targetField?.storage_kind === "custom_value") {
+        customUpdates[targetField.field_key] = normalizedValue;
+        nextCustomDirty[targetField.field_key] = true;
+      } else {
+        coreUpdates[targetKey] = normalizedValue;
+        nextDirty[targetKey] = true;
+      }
+      changed = true;
+    });
+
+    if (changed) {
+      setQuestionAnswers(nextAnswers);
+      setQuestionDrafts((prev) => ({ ...prev, ...nextAnswers }));
+      setSkippedQuestions(nextSkipped);
+      if (Object.keys(coreUpdates).length > 0) {
+        setDirtyFields((prev) => ({ ...prev, ...nextDirty }));
+        setForm((prev) => ({ ...prev, ...coreUpdates }));
+      }
+      if (Object.keys(customUpdates).length > 0) {
+        setCustomFieldDirty((prev) => ({ ...prev, ...nextCustomDirty }));
+        setCustomFieldValues((prev) => ({ ...prev, ...customUpdates }));
+      }
+      void persistQuickQuestionState(nextAnswers, nextSkipped);
     }
+  }
 
-    if (questionKey === "contact_phone") return;
-
-    setDirtyFields((prev) => ({ ...prev, [questionKey]: true }));
-    setForm((prev) => ({ ...prev, [questionKey]: normalizedValue }));
+  function handleSkipQuestion(questionKey: string) {
+    const nextSkipped = { ...skippedQuestions, [questionKey]: true };
+    setSkippedQuestions(nextSkipped);
+    void persistQuickQuestionState(questionAnswers, nextSkipped);
   }
 
   async function loadExistingRecord(recordId: string) {
@@ -547,6 +681,9 @@ export default function IntakeReviewPage() {
   }
 
   function handleNextStep() {
+    if (step === 1) {
+      commitPendingQuestionDrafts();
+    }
     if (step === 1 && selectedType !== "other" && !hierarchyNodeId) {
       setHierarchyValidation("Choose a hierarchy path before continuing to the extracted data review.");
       return;
@@ -557,11 +694,36 @@ export default function IntakeReviewPage() {
     if (step === 2 && selectedType !== "other" && !validateDynamicFields()) {
       return;
     }
+    if (step === 3 && !mode) {
+      setModeValidation("Choose whether to create a new record or update an existing one.");
+      return;
+    }
+    if (step === 3 && mode === "update_existing" && !selectedRecordId) {
+      setModeValidation("Select an existing record before continuing.");
+      return;
+    }
     setStep((s) => Math.min(4, s + 1));
   }
 
+  const handleHierarchySelectionChange = useCallback((node: HierarchyNode | null) => {
+    if (!node) {
+      setSelectedHierarchySummary((prev) => (prev === null ? prev : null));
+      return;
+    }
+    setSelectedHierarchySummary((prev) => {
+      const next = { name: node.name, path: node.path_text, nodeKind: node.node_kind };
+      if (prev && prev.name === next.name && prev.path === next.path && prev.nodeKind === next.nodeKind) return prev;
+      return next;
+    });
+  }, []);
+
   async function saveConfirmation() {
     if (!session || selectedType === "other") return;
+    if (!mode) {
+      setStep(3);
+      setModeValidation("Choose whether to create a new record or update an existing one.");
+      return;
+    }
     if (session.status === "confirmed") {
       setSaveToast("This intake is already confirmed.");
       return;
@@ -596,7 +758,7 @@ export default function IntakeReviewPage() {
     const payload = {
       intakeSessionId: session.id,
       type: selectedType,
-      mode,
+      mode: mode as Exclude<Mode, "">,
       selectedRecordId: mode === "update_existing" ? selectedRecordId : undefined,
       extractedData: form,
       mergeDecisions,
@@ -677,58 +839,6 @@ export default function IntakeReviewPage() {
           {aiError && <p className="mt-2 text-xs text-red-600">{aiError}</p>}
         </div>
 
-        {quickQuestions.length > 0 && (
-          <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3">
-            <h3 className="text-sm font-semibold text-slate-800">Quick questions to finalize this intake</h3>
-            <div className="mt-2 space-y-2">
-              {quickQuestions.slice(0, 3).map((question) => (
-                <div key={question.key} className="grid grid-cols-[1fr_auto] items-center gap-2">
-                  {question.type === "select" ? (
-                    <select
-                      value={questionAnswers[question.key] || ""}
-                      onChange={(e) => applyQuestionAnswer(question.key, e.target.value)}
-                      className="rounded border border-slate-300 px-2 py-1.5 text-sm"
-                    >
-                      <option value="">{question.label}</option>
-                      {(question.options || []).map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                  ) : question.type === "multiselect" ? (
-                    <select
-                      multiple
-                      value={(questionAnswers[question.key] || "").split(",").map((v) => v.trim()).filter(Boolean)}
-                      onChange={(e) => {
-                        const selected = Array.from(e.target.selectedOptions).map((o) => o.value).join(", ");
-                        applyQuestionAnswer(question.key, selected);
-                      }}
-                      className="rounded border border-slate-300 px-2 py-1.5 text-sm"
-                    >
-                      {(question.options || defaultAreas).map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type={question.type === "number" ? "number" : "text"}
-                      value={questionAnswers[question.key] || ""}
-                      onChange={(e) => applyQuestionAnswer(question.key, e.target.value)}
-                      placeholder={question.label}
-                      className="rounded border border-slate-300 px-2 py-1.5 text-sm"
-                    />
-                  )}
-                  <button
-                    onClick={() => setSkippedQuestions((prev) => ({ ...prev, [question.key]: true }))}
-                    className="rounded border border-slate-300 px-2 py-1 text-xs"
-                  >
-                    Skip
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         <div className="mb-6 grid grid-cols-4 gap-2">
           {steps.map((label, idx) => {
             const i = idx + 1;
@@ -773,7 +883,74 @@ export default function IntakeReviewPage() {
               canCreate={isAdmin}
               disabled={session.status === "confirmed"}
               onChange={handleHierarchyChange}
+              onSelectionChange={handleHierarchySelectionChange}
             />
+
+            {visibleQuickQuestions.length > 0 && (
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                <h3 className="text-sm font-semibold text-slate-800">Quick questions (Step 1 only)</h3>
+                <p className="mt-1 text-xs text-slate-600">Answer what you know to auto-fill key fields, or skip and continue.</p>
+                <div className="mt-2 space-y-2">
+                  {visibleQuickQuestions.slice(0, 3).map((question) => (
+                    <div key={question.key} className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
+                      {question.type === "select" ? (
+                        <select
+                          value={questionDrafts[question.key] || ""}
+                          onChange={(e) => setQuestionDrafts((prev) => ({ ...prev, [question.key]: e.target.value }))}
+                          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+                        >
+                          <option value="">{question.label}</option>
+                          {(question.options || []).map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      ) : question.type === "multiselect" ? (
+                        <select
+                          multiple
+                          value={(questionDrafts[question.key] || "").split(",").map((v) => v.trim()).filter(Boolean)}
+                          onChange={(e) => {
+                            const selected = Array.from(e.target.selectedOptions).map((o) => o.value).join(", ");
+                            setQuestionDrafts((prev) => ({ ...prev, [question.key]: selected }));
+                          }}
+                          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+                        >
+                          {(question.options || defaultAreas).map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={question.type === "number" ? "number" : "text"}
+                          value={questionDrafts[question.key] || ""}
+                          onChange={(e) => setQuestionDrafts((prev) => ({ ...prev, [question.key]: e.target.value }))}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              commitQuestionDraft(question.key);
+                            }
+                          }}
+                          placeholder={question.label}
+                          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+                        />
+                      )}
+                      <button
+                        onClick={() => commitQuestionDraft(question.key)}
+                        disabled={!String(questionDrafts[question.key] || "").trim()}
+                        className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        onClick={() => handleSkipQuestion(question.key)}
+                        className="rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {selectedType !== "other" && hasUploadedMedia && (
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -879,9 +1056,14 @@ export default function IntakeReviewPage() {
           <div className="space-y-4">
             <p className="text-sm text-slate-700">Is this a new record or update an existing one?</p>
             <div className="flex gap-2">
-              <button className={`rounded-lg border px-3 py-2 text-sm ${mode === "create_new" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`} onClick={() => setMode("create_new")}>Create New</button>
-              <button className={`rounded-lg border px-3 py-2 text-sm ${mode === "update_existing" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`} onClick={() => setMode("update_existing")}>Update Existing</button>
+              <button className={`rounded-lg border px-3 py-2 text-sm ${mode === "create_new" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`} onClick={() => { setMode("create_new"); setModeValidation(""); }}>Create New</button>
+              <button className={`rounded-lg border px-3 py-2 text-sm ${mode === "update_existing" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`} onClick={() => { setMode("update_existing"); setModeValidation(""); }}>Update Existing</button>
             </div>
+            {modeValidation && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                {modeValidation}
+              </div>
+            )}
 
             {mode === "update_existing" && selectedType !== "other" && (
               <>
@@ -908,7 +1090,15 @@ export default function IntakeReviewPage() {
           <div className="space-y-3">
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
               <p className="font-semibold text-slate-900">Hierarchy destination</p>
-              <p className="mt-1">{hierarchyNodeId ? "A hierarchy node has been selected and will be linked to the saved record." : "No hierarchy node selected yet. Go back to Step 1 before saving."}</p>
+              {selectedHierarchySummary ? (
+                <div className="mt-2">
+                  <p className="font-medium text-slate-900">{selectedHierarchySummary.name}</p>
+                  <p className="text-xs text-slate-600">{selectedHierarchySummary.path}</p>
+                  <p className="mt-1 text-xs uppercase text-slate-500">{selectedHierarchySummary.nodeKind}</p>
+                </div>
+              ) : (
+                <p className="mt-1">No hierarchy node selected yet. Go back to Step 1 before saving.</p>
+              )}
               {hasUploadedMedia && (
                 <p className="mt-2 text-xs text-slate-600">
                   Media will be stored in a new child folder named <span className="font-semibold text-slate-900">{mediaFolderName.trim() || "—"}</span> under the selected hierarchy node.
@@ -944,15 +1134,19 @@ export default function IntakeReviewPage() {
               </div>
             ))}
 
-            <button disabled={saving || session.status === "confirmed" || (mode === "update_existing" && !selectedRecordId) || selectedType === "other" || !hierarchyNodeId || (hasUploadedMedia && !mediaFolderName.trim())} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-              {saving ? "Saving..." : "Save Confirmation"}
+            <button disabled={saving || session.status === "confirmed" || !mode || (mode === "update_existing" && !selectedRecordId) || selectedType === "other" || !hierarchyNodeId || (hasUploadedMedia && !mediaFolderName.trim())} onClick={saveConfirmation} className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+              {saving ? "Saving..." : "Confirm & Save"}
             </button>
           </div>
         )}
 
         <div className="mt-6 flex justify-between">
           <button onClick={() => setStep((s) => Math.max(1, s - 1))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">Back</button>
-          <button onClick={handleNextStep} className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Next</button>
+          {step < 4 ? (
+            <button onClick={handleNextStep} className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Next</button>
+          ) : (
+            <div />
+          )}
         </div>
       </section>
 

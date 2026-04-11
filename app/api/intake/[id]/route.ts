@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient } from "@/services/supabase/client";
 import { requireAdminActor } from "@/services/auth/role.service";
+import { z } from "zod";
 
 type ReviewType = "sale" | "rent" | "buyer" | "client" | "other";
 type QuestionType = "text" | "number" | "select" | "multiselect" | "phone";
@@ -11,6 +12,11 @@ type QuickQuestion = {
   type: QuestionType;
   options?: string[];
 };
+
+const quickQuestionStateSchema = z.object({
+  questionAnswers: z.record(z.string(), z.string()).default({}),
+  skippedQuestions: z.record(z.string(), z.boolean()).default({})
+});
 
 
 function asText(value: unknown) {
@@ -97,4 +103,45 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
   const quick_questions = deriveQuestions(type, aiJson, String(session.raw_text || ""), missingFields);
 
   return NextResponse.json({ session, media: media || [], quick_questions });
+}
+
+export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const { errorResponse } = await requireAdminActor(request);
+    if (errorResponse) return errorResponse;
+
+    const payload = quickQuestionStateSchema.parse(await request.json().catch(() => ({})));
+    const supabase = createSupabaseClient();
+
+    const { data: session, error: fetchError } = await supabase
+      .from("intake_sessions")
+      .select("id, ai_meta")
+      .eq("id", params.id)
+      .single();
+
+    if (fetchError || !session) {
+      return NextResponse.json({ error: fetchError?.message || "Session not found" }, { status: 404 });
+    }
+
+    const currentMeta = (session.ai_meta || {}) as Record<string, unknown>;
+    const nextMeta = {
+      ...currentMeta,
+      quick_question_state: {
+        questionAnswers: payload.questionAnswers || {},
+        skippedQuestions: payload.skippedQuestions || {},
+        updatedAt: new Date().toISOString()
+      }
+    };
+
+    const { error: updateError } = await supabase
+      .from("intake_sessions")
+      .update({ ai_meta: nextMeta })
+      .eq("id", params.id);
+
+    if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) return NextResponse.json({ error: "Invalid payload", issues: error.issues }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unknown error" }, { status: 500 });
+  }
 }
